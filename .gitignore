@@ -1,0 +1,46 @@
+# Python bytecode and cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# Pytest and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# RL checkpoints, logs, and artifacts
+checkpoints/
+runs/
+*.tfevents.*
+
+# Temporary files and mailboxes
+*.tmp
+*.bin
+*.log
+mesen.stderr.log
+command.in
+ready.txt
+error.txt
+
+# ROMs and emulator saves
+*.nes
+*.rom
+*.sav
+*.state
+
+# Archives
+*.zip
+*.tar.gz
+
+# Environment and IDE
+.env
+.venv/
+venv/
+ENV/
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db

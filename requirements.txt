@@ -1,0 +1,9 @@
+# Production runtime dependencies for Python 3.14.x on Windows + NVIDIA CUDA.
+# PyTorch 2.13.0 is the current stable release as of August 2026 and publishes
+# native CPython 3.14 Windows wheels. The default PyPI wheel uses CUDA 13.0.
+
+numpy
+psutil
+tensorboard
+
+# No LuaSocket dependency is required; transport uses the Mesen Lua I/O API.
