@@ -1,0 +1,69 @@
+{
+  "seed": 42,
+  "device": "cuda",
+  "mesen": {
+    "executable": "Mesen.exe",
+    "rom": "Tennis (JU).nes",
+    "lua_script": "mesen/bridge.lua",
+    "workers": 8,
+    "host": "127.0.0.1",
+    "port_start": 39100,
+    "startup_timeout_s": 20,
+    "socket_timeout_s": 30,
+    "frame_skip": 4,
+    "observation_width": 84,
+    "observation_height": 84,
+    "save_state_path": "",
+    "auto_reset_to_saved_state": true,
+    "reset_startup_frames": 0,
+    "match_games": 6,
+    "ipc_dir": "runs/mesen_ipc",
+    "transport": "file_mailbox",
+    "capture_stderr": false
+  },
+  "environment": {
+    "action_count": 19,
+    "stack_size": 4,
+    "episode_max_steps": 15000,
+    "terminal_match_reward": 25.0,
+    "living_penalty": 0.0
+  },
+  "reward": {
+    "point_win": 1.0,
+    "point_loss": -1.0,
+    "game_win": 5.0,
+    "game_loss": -5.0,
+    "game_progress": 0.0,
+    "diagnostic_ram": true
+  },
+  "network": {
+    "channels": [
+      32,
+      64,
+      64
+    ],
+    "embedding_dim": 256,
+    "gru_hidden": 256,
+    "gru_layers": 1
+  },
+  "ppo": {
+    "rollout_steps": 1024,
+    "epochs": 4,
+    "sequence_length": 32,
+    "sequence_batch_size": 16,
+    "learning_rate": 0.00025,
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "clip_range": 0.1,
+    "value_clip_range": 0.1,
+    "entropy_coef": 0.01,
+    "value_coef": 0.5,
+    "max_grad_norm": 0.5,
+    "amp": true,
+    "total_steps": 5000000,
+    "checkpoint_every_updates": 25,
+    "save_dir": "checkpoints",
+    "tensorboard_dir": "runs",
+    "max_step_checkpoints": 3
+  }
+}
