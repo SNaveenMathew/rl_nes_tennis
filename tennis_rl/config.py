@@ -18,6 +18,7 @@ class MesenConfig:
     socket_timeout_s: float = 30.0
     frame_skip: int = 4
     match_games: int = 6
+    game_level: int = 1
     observation_width: int = 84
     observation_height: int = 84
     save_state_path: str = ""
@@ -26,6 +27,7 @@ class MesenConfig:
     transport: str = "file_mailbox"
     ipc_dir: str = "runs/mesen_ipc"
     capture_stderr: bool = False
+    headless: bool = True
 
 
 @dataclass

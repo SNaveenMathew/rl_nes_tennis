@@ -103,6 +103,7 @@ def build_workers(cfg: Config) -> list[MesenWorker]:
             height=cfg.mesen.observation_height,
             frame_skip=cfg.mesen.frame_skip,
             match_games=cfg.mesen.match_games,
+            game_level=cfg.mesen.game_level,
             startup_timeout=cfg.mesen.startup_timeout_s,
             socket_timeout=cfg.mesen.socket_timeout_s,
             point_win=cfg.reward.point_win,
@@ -252,10 +253,14 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/base.json")
     parser.add_argument("--resume", default="")
+    parser.add_argument("--level", type=int, default=None, choices=range(1, 6), metavar="{1-5}",
+                        help="CPU difficulty level (1-5, default from config).")
     parser.add_argument("--smoke-test", action="store_true")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    if args.level is not None:
+        cfg.mesen.game_level = args.level
     seed_everything(cfg.seed)
 
     if not torch.cuda.is_available() and cfg.device == "cuda":

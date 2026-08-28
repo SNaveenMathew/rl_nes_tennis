@@ -19,16 +19,20 @@ def main() -> None:
     parser.add_argument("--config", default="configs/base.json")
     parser.add_argument("--checkpoint", default="checkpoints/tennis_latest.pt")
     parser.add_argument("--episodes", type=int, default=20)
+    parser.add_argument("--level", type=int, default=None, choices=range(1, 6), metavar="{1-5}",
+                        help="CPU difficulty level (1-5, default from config).")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    if args.level is not None:
+        cfg.mesen.game_level = args.level
     if cfg.mesen.transport != "file_mailbox":
         raise ValueError(f"Unsupported Mesen transport: {cfg.mesen.transport!r}; expected 'file_mailbox'")
     if cfg.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA is unavailable.")
     device = torch.device(cfg.device)
 
-    run_id = f"run_{time.strftime("%Y%m%d_%H%M%S")}_{os.getpid()}_{random.getrandbits(40):010x}"
+    run_id = f"run_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}_{random.getrandbits(40):010x}"
     workers = [
         MesenWorker(
             cfg.mesen.executable,
@@ -42,6 +46,7 @@ def main() -> None:
             cfg.mesen.startup_timeout_s,
             cfg.mesen.socket_timeout_s,
             match_games=cfg.mesen.match_games,
+            game_level=cfg.mesen.game_level,
             point_win=cfg.reward.point_win,
             point_loss=cfg.reward.point_loss,
             game_win=cfg.reward.game_win,
