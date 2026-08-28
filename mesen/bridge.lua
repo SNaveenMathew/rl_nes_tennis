@@ -25,6 +25,8 @@ local IPC_DIR = os.getenv("MESEN_RL_IPC_DIR") or "runs/mesen_ipc/worker"
 local WIDTH = tonumber(os.getenv("MESEN_RL_W") or "84")
 local HEIGHT = tonumber(os.getenv("MESEN_RL_H") or "84")
 local FRAME_SKIP = tonumber(os.getenv("MESEN_RL_FRAME_SKIP") or "4")
+local GAME_LEVEL = tonumber(os.getenv("MESEN_RL_LEVEL") or "1")
+local AUTO_BOOT = os.getenv("MESEN_RL_AUTO_BOOT") ~= "0"
 -- NES renders a fixed 256x240 framebuffer for this game.
 local SRC_W = 256
 local SRC_H = 240
@@ -55,9 +57,13 @@ local last_player_score = 0
 local last_player_games = 0
 local last_point_end = 0
 local saved_state = nil
+local match_savestate = nil
+local boot_frame = 0
+local boot_complete = not AUTO_BOOT
 local save_pending = false
 local load_pending = false
 local stopped = false
+local held_buttons = {}  -- button_name -> frames_remaining; used by HOLD/START commands
 
 local BUTTONS = {
     left = false,
@@ -141,15 +147,35 @@ local function apply_command(line)
             frame_counter = 0
         end
     elseif cmd == "R" then
-        -- Reset is intentionally unsupported inside a frame callback.
-        -- The host restarts the Mesen worker for episode resets so the
-        -- emulator lifecycle stays outside the callback/event loop.
-        report_error("R command is unsupported; restart the worker for reset")
-        return false
+        if match_savestate ~= nil then
+            pcall(function()
+                emu.loadSavestate(match_savestate)
+            end)
+            initialized = false
+            frame_counter = 0
+            step_pending = false
+            pending_token = nil
+            current_action = 0
+        else
+            report_error("R command is unsupported without match savestate; restart the worker for reset")
+            return false
+        end
     elseif cmd == "SV" then
         save_pending = true
     elseif cmd == "LS" then
         load_pending = true
+    elseif cmd == "HOLD" then
+        -- HOLD button_name N_frames  — hold any NES button for N frames.
+        -- Valid button names: left, right, up, down, a, b, start, select.
+        local button_name, n_text = rest:match("^(%S+)%s+(%S+)$")
+        local n = tonumber(n_text) or 0
+        if button_name and n > 0 and BUTTONS[button_name] ~= nil then
+            held_buttons[button_name] = math.max(1, math.floor(n))
+        end
+    elseif cmd == "START" then
+        -- Backward-compat alias: START N  ≡  HOLD start N
+        local n = tonumber(rest) or 60
+        held_buttons["start"] = math.max(1, math.floor(n))
     elseif cmd == "Q" then
         stopped = true
         pcall(function() write_text(READY_PATH, "BYE\n") end)
@@ -169,8 +195,73 @@ local function poll_command()
     end
 end
 
-local function current_input()
+local function get_boot_input()
     clear_buttons()
+    boot_frame = boot_frame + 1
+
+    -- Step 1: Wait for title screen to appear (60 frames)
+    if boot_frame <= 60 then
+        return BUTTONS
+    -- Step 2: Press Start (15 frames) to select Singles (1 Player: 1 Game)
+    elseif boot_frame <= 75 then
+        BUTTONS["start"] = true
+        return BUTTONS
+    -- Step 3: Wait for Level Selection screen (40 frames)
+    elseif boot_frame <= 115 then
+        return BUTTONS
+    end
+
+    -- Step 4: Navigate to desired GAME_LEVEL (1 to 5)
+    local cur_f = 116
+    for step = 1, (GAME_LEVEL - 1) do
+        if boot_frame >= cur_f and boot_frame < cur_f + 8 then
+            BUTTONS["right"] = true
+            return BUTTONS
+        elseif boot_frame >= cur_f + 8 and boot_frame < cur_f + 20 then
+            return BUTTONS
+        end
+        cur_f = cur_f + 20
+    end
+
+    -- Step 5: Press Start (15 frames) to confirm Level and start the match
+    if boot_frame >= cur_f and boot_frame < cur_f + 15 then
+        BUTTONS["start"] = true
+        return BUTTONS
+    end
+
+    -- Step 6: Wait for court transition / players to take positions
+    local finish_f = cur_f + 75
+    if boot_frame >= finish_f and not boot_complete then
+        boot_complete = true
+        pcall(function()
+            match_savestate = emu.createSavestate()
+        end)
+        local ok = write_text(READY_PATH, string.format("READY %d %d %d\n", WIDTH, HEIGHT, FRAME_SKIP))
+        if not ok then
+            report_error("Unable to initialize IPC mailbox; enable Mesen Lua I/O/OS access")
+            emu.stop(32)
+        end
+    end
+
+    return BUTTONS
+end
+
+local function current_input()
+    if not boot_complete then
+        return get_boot_input()
+    end
+    clear_buttons()
+    -- Apply any button holds (HOLD/START commands override the policy action).
+    local any_held = false
+    for button, frames in pairs(held_buttons) do
+        if frames > 0 then
+            BUTTONS[button] = true
+            any_held = true
+        end
+    end
+    if any_held then
+        return BUTTONS
+    end
     local buttons = ACTIONS[current_action + 1] or ACTIONS[1]
     for _, name in ipairs(buttons) do BUTTONS[name] = true end
     return BUTTONS
@@ -281,7 +372,7 @@ end
 local input_callback = emu.addEventCallback(function()
     -- Action is consumed at every controller poll, exactly where Mesen recommends
     -- setInput() be applied.
-    emu.setInput(current_input(), 0)
+    emu.setInput(0, current_input())
 end, emu.eventType.inputPolled)
 
 local function process_state_requests()
@@ -315,12 +406,23 @@ local end_callback = emu.addEventCallback(function()
     if stopped then return end
 
     local ok, err = pcall(function()
+        if not boot_complete then
+            return
+        end
+
         -- Poll commands every emulator frame. This keeps reset/action latency
         -- deterministic under --testrunner; the expensive operation (frame
         -- serialization) remains limited to FRAME_SKIP frames below.
         poll_command()
 
         process_state_requests()
+
+        -- Count down held-button frames (HOLD/START commands from watch.py).
+        for button, frames in pairs(held_buttons) do
+            if frames > 0 then
+                held_buttons[button] = frames - 1
+            end
+        end
 
         -- Lock-step environment protocol: Python publishes one command, and
         -- Mesen emits exactly one observation after FRAME_SKIP frames. This
@@ -345,10 +447,12 @@ end, emu.eventType.endFrame)
 local function startup()
     os.remove(ERROR_PATH)
     os.remove(READY_PATH)
-    local ok = write_text(READY_PATH, string.format("READY %d %d %d\n", WIDTH, HEIGHT, FRAME_SKIP))
-    if not ok then
-        report_error("Unable to initialize IPC mailbox; enable Mesen Lua I/O/OS access")
-        emu.stop(32)
+    if not AUTO_BOOT then
+        local ok = write_text(READY_PATH, string.format("READY %d %d %d\n", WIDTH, HEIGHT, FRAME_SKIP))
+        if not ok then
+            report_error("Unable to initialize IPC mailbox; enable Mesen Lua I/O/OS access")
+            emu.stop(32)
+        end
     end
 end
 

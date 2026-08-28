@@ -36,12 +36,14 @@ class MesenWorker:
         startup_timeout: float,
         socket_timeout: float,
         match_games: int = 6,
+        game_level: int = 1,
         point_win: float = 1.0,
         point_loss: float = -1.0,
         game_win: float = 5.0,
         ipc_dir: str | None = None,
         run_id: str | None = None,
         capture_stderr: bool = False,
+        headless: bool = True,
     ) -> None:
         # host/port are retained for config backward compatibility; transport is
         # now local filesystem IPC and never opens a TCP socket.
@@ -55,6 +57,7 @@ class MesenWorker:
         self.startup_timeout = startup_timeout
         self.socket_timeout = socket_timeout
         self.match_games = match_games
+        self.game_level = game_level
         self.point_win = point_win
         self.point_loss = point_loss
         self.game_win = game_win
@@ -65,12 +68,13 @@ class MesenWorker:
         self.stderr_file: Any | None = None
         self.seq = -1
         self.capture_stderr = bool(capture_stderr)
+        self.headless = bool(headless)
 
         base = Path(ipc_dir or (Path("runs") / "mesen_ipc"))
         # Never reuse a mailbox directory across launches. This prevents stale
         # observation/ready markers from a previous crashed run from being
         # mistaken for frames from the current Mesen process.
-        self.run_id = run_id or f"run_{time.strftime("%Y%m%d_%H%M%S")}_{os.getpid()}_{uuid.uuid4().hex[:10]}"
+        self.run_id = run_id or f"run_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}_{uuid.uuid4().hex[:10]}"
         self.ipc_dir = (base / self.run_id / f"worker_{port}").resolve()
         self.ipc_dir.mkdir(parents=True, exist_ok=True)
         # Controller/reset commands are a latest-value mailbox, not a queue.
@@ -130,6 +134,7 @@ class MesenWorker:
             "MESEN_RL_H": str(self.height),
             "MESEN_RL_FRAME_SKIP": str(self.frame_skip),
             "MESEN_RL_MATCH_GAMES": str(self.match_games),
+            "MESEN_RL_LEVEL": str(self.game_level),
             "MESEN_RL_POINT_WIN": str(self.point_win),
             "MESEN_RL_POINT_LOSS": str(self.point_loss),
             "MESEN_RL_GAME_WIN": str(self.game_win),
@@ -150,7 +155,8 @@ class MesenWorker:
             self.stderr_file = None
             stderr_target = subprocess.DEVNULL
 
-        args = [
+        if self.headless:
+            args = [
             self.executable,
             "--testrunner",
             "--enableStdout",
@@ -159,7 +165,15 @@ class MesenWorker:
             "--debug.scriptWindow.allowIoOsAccess=true",
             self.rom,
             self.lua_script,
-        ]
+            ]
+        else:
+            args = [
+            self.executable,
+            "--doNotSaveSettings",
+            "--debug.scriptWindow.allowIoOsAccess=true",
+            self.rom,
+            self.lua_script,
+            ]
 
         try:
             self.process = subprocess.Popen(
@@ -411,6 +425,26 @@ class MesenWorker:
         token = self._new_token()
         self.pending_token = token
         self._write_command(f"A {token} 0\n")
+
+    def press_start(self, frames: int = 60) -> None:
+        """Hold the Start button for `frames` NES frames.
+
+        Useful in non-headless (watch) mode to dismiss the Tennis title/
+        difficulty screen before handing control to the policy.  The bridge
+        will override the current policy action with Start for the requested
+        number of frames, then resume normal action delivery.
+        """
+        self._write_command(f"START {frames}\n")
+
+    def hold_button(self, button: str, frames: int = 30) -> None:
+        """Hold any NES button for `frames` NES frames.
+
+        Valid button names: left, right, up, down, a, b, start, select.
+        Multiple calls stack independently — the bridge tracks per-button
+        countdowns so you can queue Right and then Start without one
+        cancelling the other.
+        """
+        self._write_command(f"HOLD {button} {frames}\n")
 
     def save_state(self) -> None:
         self._write_command("SV\n")
