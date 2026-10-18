@@ -1,9 +1,10 @@
-# Production runtime dependencies for Python 3.14.x on Windows + NVIDIA CUDA.
-# PyTorch 2.13.0 is the current stable release as of August 2026 and publishes
-# native CPython 3.14 Windows wheels. The default PyPI wheel uses CUDA 13.0.
+# Runtime dependencies for Windows + Mesen 2 and local RL training.
+# Install the CUDA-specific PyTorch build appropriate for the workstation if needed.
+numpy>=2.0
+psutil>=5.9
+torch>=2.6
+tensorboard>=2.14
 
-numpy
-psutil
-tensorboard
-
-# No LuaSocket dependency is required; transport uses the Mesen Lua I/O API.
+# Test/development dependencies. Mesen itself is a separate Windows application.
+pytest>=8.0
+lupa>=2.5

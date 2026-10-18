@@ -119,3 +119,35 @@ def test_worker_reset_restarts_process_without_r_command(monkeypatch, tmp_path):
     assert sent and sent[-1].startswith("A ") and sent[-1].endswith(" 0\n")
     assert worker.pending_token is not None
     assert worker.next_token == 2
+
+
+def test_consume_observation_parses_player_and_opponent_info(tmp_path):
+    worker = object.__new__(MesenWorker)
+    worker.ipc_dir = tmp_path
+    worker.width = 2
+    worker.height = 2
+    worker.socket_timeout = 1.0
+    worker.pending_token = "0000000000000042"
+
+    token = "0000000000000042"
+    obs_path = tmp_path / f"observation_{token}.bin"
+    ready_path = tmp_path / f"observation_ready_{token}.ready"
+
+    # header: O <token> <reward> <done> <p_score> <p_games> <o_score> <o_games> <point_end>
+    header = f"O {token} 1.000000 0 2 3 1 4 1\n".encode("ascii")
+    payload = b"\x00\x10\x20\x30"
+    obs_path.write_bytes(header + payload)
+    ready_path.write_text("READY\n")
+
+    img, reward, done, info = worker._consume_observation()
+    assert img.shape == (2, 2)
+    assert reward == 1.0
+    assert not done
+    assert info["player_score"] == 2
+    assert info["player_games"] == 3
+    assert info["opponent_score"] == 1
+    assert info["opponent_games"] == 4
+    assert info["point_end"] == 1
+    assert info["token"] == token
+    assert not obs_path.exists()
+    assert not ready_path.exists()

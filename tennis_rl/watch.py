@@ -30,12 +30,13 @@ from .config import load_config
 from .env import ParallelTennis
 from .mesen_client import MesenWorker
 from .model import RecurrentActorCritic
+from .hierarchical import HierarchicalActorCritic, HierarchicalController
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--config", default="configs/base.json")
-    parser.add_argument("--checkpoint", default="checkpoints/tennis_latest.pt")
+    parser.add_argument("--config", default="configs/scenario.json")
+    parser.add_argument("--checkpoint", default="checkpoints_hierarchical/hierarchical_latest.pt")
     parser.add_argument("--episodes", type=int, default=3)
     parser.add_argument("--sample", action="store_true", help="Sample actions instead of taking the argmax (deterministic).")
     parser.add_argument("--level", type=int, default=1, choices=range(1, 6), metavar="{1-5}",
@@ -66,25 +67,50 @@ def main() -> None:
         point_win=cfg.reward.point_win,
         point_loss=cfg.reward.point_loss,
         game_win=cfg.reward.game_win,
+        game_loss=cfg.reward.game_loss,
         ipc_dir=cfg.mesen.ipc_dir,
         run_id=run_id,
         headless=False,  # real, visible Mesen window
+        lockstep=cfg.mesen.lockstep,
+        lockstep_timeout_s=cfg.mesen.lockstep_timeout_s,
     )
     env = ParallelTennis([worker], cfg.environment.stack_size, cfg.environment.episode_max_steps)
 
-    model = RecurrentActorCritic(
-        env.observation_shape[0],
-        cfg.environment.action_count,
-        cfg.network.channels,
-        cfg.network.embedding_dim,
-        cfg.network.gru_hidden,
-        cfg.network.gru_layers,
-    ).to(device)
-    with torch.no_grad():
-        dummy = torch.zeros((1, *env.observation_shape), device=device)
-        model.act(dummy, model.initial_hidden(1, device), deterministic=True)  # materialize LazyLinear before loading weights
     payload = torch.load(args.checkpoint, map_location=device, weights_only=False)
-    model.load_state_dict(payload["model"])
+    hierarchical = payload.get("format") == "tennis_rl_hierarchical_v1"
+    controller = None
+    if hierarchical:
+        model = HierarchicalActorCritic(
+            observation_channels=env.observation_shape[0],
+            action_count=cfg.environment.action_count,
+            channels=cfg.network.channels,
+            embedding_dim=cfg.network.embedding_dim,
+            hidden_dim=cfg.hierarchical.hidden_dim,
+            skills=payload.get("skills", cfg.hierarchical.skills),
+            durations=payload.get("durations", cfg.hierarchical.durations),
+            input_size=(cfg.mesen.observation_height, cfg.mesen.observation_width),
+        ).to(device)
+        model.load_state_dict(payload["model"])
+        controller = HierarchicalController(model, deterministic=True)
+    else:
+        model = RecurrentActorCritic(
+            env.observation_shape[0],
+            cfg.environment.action_count,
+            cfg.network.channels,
+            cfg.network.embedding_dim,
+            cfg.network.gru_hidden,
+            cfg.network.gru_layers,
+            input_size=(cfg.mesen.observation_height, cfg.mesen.observation_width),
+        ).to(device)
+        with torch.no_grad():
+            dummy = torch.zeros((1, *env.observation_shape), device=device)
+            model.act(dummy, model.initial_hidden(1, device), deterministic=True)
+        missing, unexpected = model.load_state_dict(payload["model"], strict=False)
+        # The only permitted missing parameter when loading older flat checkpoints
+        # is the newly introduced movement x shot interaction head (zero-init).
+        bad_missing = [k for k in missing if not k.startswith("joint_interaction_head.")]
+        if bad_missing or unexpected:
+            raise RuntimeError(f"Checkpoint/model mismatch: missing={bad_missing}, unexpected={unexpected}")
     model.eval()
     print(
         f"Loaded checkpoint: {args.checkpoint} "
@@ -102,36 +128,54 @@ def main() -> None:
             "Auto-start suppressed. Navigate the title/difficulty screen manually."
         )
 
+    score_labels = {0: "0", 1: "15", 2: "30", 3: "40", 4: "Ad"}
     completed = 0
     try:
         obs = env.reset()
         hidden = model.initial_hidden(1, device)
         episode_reward = 0.0
-        last_seen = (0, 0)
+        last_seen = (0, 0, 0, 0)
         while completed < args.episodes:
             obs_t = torch.from_numpy(obs).to(device).float() / 255.0
             with torch.inference_mode():
-                actions, _, _, next_hidden = model.act(obs_t, hidden, deterministic=not args.sample)
+                if controller is not None:
+                    controller.deterministic = not args.sample
+                    actions = controller.act(obs_t)
+                    next_hidden = None
+                else:
+                    actions, _, _, next_hidden = model.act(obs_t, hidden, deterministic=not args.sample)
             batch = env.step(actions.cpu().numpy())
-            hidden = next_hidden
+            hidden = next_hidden if next_hidden is not None else hidden
             episode_reward += float(batch.rewards[0])
 
             info = batch.infos[0]
-            seen = (info.get("player_games", 0), info.get("player_score", 0))
-            if info.get("point_end") and seen != last_seen:
-                print(f"  point ended -> games={seen[0]} score={seen[1]} "
-                      f"(reward so far this episode: {episode_reward:+.2f})")
+            p_games = int(info.get("player_games", 0))
+            p_score = int(info.get("player_score", 0))
+            o_games = int(info.get("opponent_games", 0))
+            o_score = int(info.get("opponent_score", 0))
+            seen = (p_games, p_score, o_games, o_score)
+            if seen != last_seen and seen != (0, 0, 0, 0):
+                p_text = score_labels.get(p_score, str(p_score))
+                o_text = score_labels.get(o_score, str(o_score))
+                print(f"  point ended -> Games [P: {p_games} - O: {o_games}] | "
+                      f"Score [P: {p_text} - O: {o_text}] (reward so far: {episode_reward:+.2f})")
             last_seen = seen
 
             if batch.dones[0]:
                 completed += 1
-                won = seen[0] >= cfg.mesen.match_games
+                won = p_games > o_games
                 print(f"Episode {completed}/{args.episodes} finished: "
-                      f"{'WIN' if won else 'loss'} | games_won={seen[0]} | total_reward={episode_reward:+.2f}")
+                      f"{'WIN' if won else 'LOSS'} | Games: {p_games}-{o_games} | "
+                      f"total_reward={episode_reward:+.2f}")
                 episode_reward = 0.0
-                hidden = model.initial_hidden(1, device)
-                last_seen = (0, 0)
-            obs = batch.observations
+                if controller is not None:
+                    controller.reset(torch.ones(1, dtype=torch.bool, device=device))
+                else:
+                    hidden = model.initial_hidden(1, device)
+                last_seen = (0, 0, 0, 0)
+            obs = batch.observations.copy()
+            if batch.dones.any():
+                obs[0] = env.current_observation(0)
     finally:
         env.close()
 

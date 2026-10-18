@@ -12,12 +12,13 @@ from .config import load_config
 from .env import ParallelTennis
 from .mesen_client import MesenWorker
 from .model import RecurrentActorCritic
+from .hierarchical import HierarchicalActorCritic, HierarchicalController
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="configs/base.json")
-    parser.add_argument("--checkpoint", default="checkpoints/tennis_latest.pt")
+    parser.add_argument("--config", default="configs/scenario.json")
+    parser.add_argument("--checkpoint", default="checkpoints_hierarchical/hierarchical_latest.pt")
     parser.add_argument("--episodes", type=int, default=20)
     parser.add_argument("--level", type=int, default=None, choices=range(1, 6), metavar="{1-5}",
                         help="CPU difficulty level (1-5, default from config).")
@@ -50,30 +51,57 @@ def main() -> None:
             point_win=cfg.reward.point_win,
             point_loss=cfg.reward.point_loss,
             game_win=cfg.reward.game_win,
+            game_loss=cfg.reward.game_loss,
             ipc_dir=cfg.mesen.ipc_dir,
             run_id=run_id,
+            lockstep=cfg.mesen.lockstep,
+            lockstep_timeout_s=cfg.mesen.lockstep_timeout_s,
         )
         for i in range(min(cfg.mesen.workers, args.episodes))
     ]
     env = ParallelTennis(workers, cfg.environment.stack_size, cfg.environment.episode_max_steps)
 
-    model = RecurrentActorCritic(
-        env.observation_shape[0],
-        cfg.environment.action_count,
-        cfg.network.channels,
-        cfg.network.embedding_dim,
-        cfg.network.gru_hidden,
-        cfg.network.gru_layers,
-    ).to(device)
-    with torch.no_grad():
-        dummy = torch.zeros((1, *env.observation_shape), device=device)
-        model.act(dummy, model.initial_hidden(1, device), deterministic=True)
     payload = torch.load(args.checkpoint, map_location=device, weights_only=False)
-    model.load_state_dict(payload["model"])
+    hierarchical = payload.get("format") == "tennis_rl_hierarchical_v1"
+    controller = None
+    if hierarchical:
+        model = HierarchicalActorCritic(
+            observation_channels=env.observation_shape[0],
+            action_count=cfg.environment.action_count,
+            channels=cfg.network.channels,
+            embedding_dim=cfg.network.embedding_dim,
+            hidden_dim=cfg.hierarchical.hidden_dim,
+            skills=payload.get("skills", cfg.hierarchical.skills),
+            durations=payload.get("durations", cfg.hierarchical.durations),
+            input_size=(cfg.mesen.observation_height, cfg.mesen.observation_width),
+        ).to(device)
+        model.load_state_dict(payload["model"])
+        controller = HierarchicalController(model, deterministic=True)
+    else:
+        model = RecurrentActorCritic(
+            env.observation_shape[0],
+            cfg.environment.action_count,
+            cfg.network.channels,
+            cfg.network.embedding_dim,
+            cfg.network.gru_hidden,
+            cfg.network.gru_layers,
+            input_size=(cfg.mesen.observation_height, cfg.mesen.observation_width),
+        ).to(device)
+        with torch.no_grad():
+            dummy = torch.zeros((1, *env.observation_shape), device=device)
+            model.act(dummy, model.initial_hidden(1, device), deterministic=True)
+        missing, unexpected = model.load_state_dict(payload["model"], strict=False)
+        # The only permitted missing parameter when loading older flat checkpoints
+        # is the newly introduced movement x shot interaction head (zero-init).
+        bad_missing = [k for k in missing if not k.startswith("joint_interaction_head.")]
+        if bad_missing or unexpected:
+            raise RuntimeError(f"Checkpoint/model mismatch: missing={bad_missing}, unexpected={unexpected}")
     model.eval()
 
     wins = 0
     rewards: list[float] = []
+    player_games_list: list[int] = []
+    opponent_games_list: list[int] = []
     completed = 0
 
     try:
@@ -83,24 +111,39 @@ def main() -> None:
         while completed < args.episodes:
             obs_t = torch.from_numpy(obs).to(device).float() / 255.0
             with torch.inference_mode():
-                actions, _, _, next_hidden = model.act(obs_t, hidden, deterministic=True)
+                if controller is not None:
+                    actions = controller.act(obs_t)
+                    next_hidden = None
+                else:
+                    actions, _, _, next_hidden = model.act(obs_t, hidden, deterministic=True)
             batch = env.step(actions.cpu().numpy())
             current_rewards += batch.rewards
-            obs = batch.observations
-            hidden = next_hidden
+            obs = batch.observations.copy()
+            hidden = next_hidden if next_hidden is not None else hidden
             if batch.dones.any():
-                mask = torch.from_numpy((~batch.dones).astype(np.float32)).to(device)
-                hidden = hidden * mask.view(1, env.n, 1)
+                for i in np.flatnonzero(batch.dones):
+                    obs[int(i)] = env.current_observation(int(i))
+                if controller is not None:
+                    controller.reset(torch.from_numpy(batch.dones).to(device))
+                else:
+                    mask = torch.from_numpy((~batch.dones).astype(np.float32)).to(device)
+                    hidden = hidden * mask.view(1, env.n, 1)
             for i, done in enumerate(batch.dones.tolist()):
                 if done and completed < args.episodes:
                     completed += 1
                     rewards.append(float(current_rewards[i]))
-                    if batch.infos[i].get("player_games", 0) >= 6:
+                    p_games = int(batch.infos[i].get("player_games", 0))
+                    o_games = int(batch.infos[i].get("opponent_games", 0))
+                    player_games_list.append(p_games)
+                    opponent_games_list.append(o_games)
+                    if p_games > o_games:
                         wins += 1
                     current_rewards[i] = 0
         print(f"episodes={completed}")
         print(f"match_wins={wins}")
         print(f"win_rate={wins / max(completed, 1):.3f}")
+        print(f"mean_player_games={float(np.mean(player_games_list)):.2f}")
+        print(f"mean_opponent_games={float(np.mean(opponent_games_list)):.2f}")
         print(f"mean_reward={float(np.mean(rewards)):.3f}")
     finally:
         env.close()

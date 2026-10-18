@@ -1,6 +1,6 @@
 param(
-  [string]$Config = "configs/base.json",
-  [string]$Checkpoint = "checkpoints/tennis_latest.pt",
+  [string]$Config = "configs/scenario.json",
+  [string]$Checkpoint = "checkpoints_hierarchical/hierarchical_latest.pt",
   [int]$Episodes = 20
 )
 

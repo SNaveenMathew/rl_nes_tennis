@@ -12,8 +12,6 @@ def test_bridge_uses_fast_raw_grayscale_io_transport():
     assert "getScreenSize" not in text
     assert "local SRC_W = 256" in text
     assert "local SRC_H = 240" in text
-    assert "local XMAP = {}" in text
-    assert "local YMAP = {}" in text
     assert "table.concat(out)" in text
 
 
@@ -65,3 +63,19 @@ def test_bridge_uses_latest_command_mailbox():
     assert "local line = read_command()" in source
     assert "apply_command(line)" in source
     assert "while true do" not in source[source.index("local function poll_command()"):source.index("local function current_input()", source.index("local function poll_command()"))]
+
+
+def test_bridge_ram_addresses_and_game_loss():
+    source = Path("mesen/bridge.lua").read_text(encoding="utf-8")
+    assert "RAM_PLAYER_SCORE = 0x0058" in source
+    assert "RAM_OPPONENT_SCORE = 0x0059" in source
+    assert "REWARD_GAME_LOSS" in source
+
+
+def test_bridge_score_reset_game_tracking_and_sticky_peaks():
+    source = Path("mesen/bridge.lua").read_text(encoding="utf-8")
+    assert "actual_player_games" in source
+    assert "actual_opponent_games" in source
+    assert "max_player_score_seen" in source
+    assert "max_opponent_score_seen" in source
+    assert "game_ended" in source

@@ -40,10 +40,16 @@ class MesenWorker:
         point_win: float = 1.0,
         point_loss: float = -1.0,
         game_win: float = 5.0,
+        game_loss: float = -5.0,
+        match_win: float = 25.0,
+        match_loss: float = -10.0,
         ipc_dir: str | None = None,
         run_id: str | None = None,
         capture_stderr: bool = False,
         headless: bool = True,
+        record_mode: bool = False,
+        lockstep: bool = True,
+        lockstep_timeout_s: float = 600.0,
     ) -> None:
         # host/port are retained for config backward compatibility; transport is
         # now local filesystem IPC and never opens a TCP socket.
@@ -61,6 +67,9 @@ class MesenWorker:
         self.point_win = point_win
         self.point_loss = point_loss
         self.game_win = game_win
+        self.game_loss = game_loss
+        self.match_win = match_win
+        self.match_loss = match_loss
         self.obs_bytes = width * height
         self.next_token = 1
         self.pending_token: str | None = None
@@ -69,6 +78,12 @@ class MesenWorker:
         self.seq = -1
         self.capture_stderr = bool(capture_stderr)
         self.headless = bool(headless)
+        self.record_mode = bool(record_mode)
+        # Lock-step: Mesen blocks between observations until the next action
+        # arrives, so frame timing no longer depends on inference latency.
+        # Never used while a human is playing (record mode).
+        self.lockstep = bool(lockstep) and not self.record_mode
+        self.lockstep_timeout_s = float(lockstep_timeout_s)
 
         base = Path(ipc_dir or (Path("runs") / "mesen_ipc"))
         # Never reuse a mailbox directory across launches. This prevents stale
@@ -138,6 +153,12 @@ class MesenWorker:
             "MESEN_RL_POINT_WIN": str(self.point_win),
             "MESEN_RL_POINT_LOSS": str(self.point_loss),
             "MESEN_RL_GAME_WIN": str(self.game_win),
+            "MESEN_RL_GAME_LOSS": str(self.game_loss),
+            "MESEN_RL_MATCH_WIN": str(self.match_win),
+            "MESEN_RL_MATCH_LOSS": str(self.match_loss),
+            "MESEN_RL_RECORD_MODE": "1" if self.record_mode else "0",
+            "MESEN_RL_LOCKSTEP": "1" if self.lockstep else "0",
+            "MESEN_RL_LOCKSTEP_TIMEOUT": str(int(self.lockstep_timeout_s)),
         })
 
         creationflags = 0
@@ -300,7 +321,33 @@ class MesenWorker:
                 return
             self._raise_if_process_exited(path.name)
             time.sleep(0.002)
-        raise BridgeError(f"Timed out waiting for {path} after {timeout}s")
+        detail = ""
+        for _name in ("error.txt", "api_info.txt"):
+            try:
+                _body = (self.ipc_dir / _name).read_text(encoding="utf-8", errors="replace").strip()
+            except OSError:
+                _body = "<missing>"
+            detail += f"\n--- {_name} ---\n{_body}"
+        raise BridgeError(f"Timed out waiting for {path} after {timeout}s{detail}")
+
+    def _unlink_when_released(self, path: Path, timeout: float = 2.0) -> None:
+        """Delete ``path``, retrying on Windows sharing violations (WinError 32).
+
+        Mesen's Lua runtime may still hold the file handle open for a brief
+        moment after writing the sentinel, so a plain unlink() races on
+        Windows.  We retry with a short backoff; if the file cannot be
+        deleted within ``timeout`` seconds we leave it (it is harmless and
+        will be swept up by _clear_mailbox on the next worker start).
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                path.unlink(missing_ok=True)
+                return
+            except PermissionError:
+                time.sleep(0.005)
+            except FileNotFoundError:
+                return
 
     def _new_token(self) -> str:
         token = f"{self.next_token:016d}"
@@ -368,7 +415,7 @@ class MesenWorker:
         header = data[:header_end].decode("ascii", errors="strict").strip()
         payload = data[header_end + 1 :]
         parts = header.split()
-        if len(parts) < 7 or parts[0] != "O":
+        if len(parts) < 9 or parts[0] != "O":
             raise BridgeError(f"Unexpected observation header: {header!r}")
 
         observed_token = parts[1]
@@ -380,7 +427,10 @@ class MesenWorker:
         done = bool(int(parts[3]))
         player_score = int(parts[4])
         player_games = int(parts[5])
-        point_end = int(parts[6])
+        opponent_score = int(parts[6])
+        opponent_games = int(parts[7])
+        point_end = int(parts[8])
+        human_action = int(parts[9]) if len(parts) >= 10 else 0
 
         expected = self.width * self.height
         if len(payload) != expected:
@@ -396,8 +446,11 @@ class MesenWorker:
         info = {
             "player_score": player_score,
             "player_games": player_games,
+            "opponent_score": opponent_score,
+            "opponent_games": opponent_games,
             "point_end": point_end,
             "token": token,
+            "human_action": human_action,
         }
         return image, reward, done, info
 
@@ -457,10 +510,33 @@ class MesenWorker:
     def load_state(self) -> None:
         self._write_command("LS\n")
         self._wait_for(self.ready_path.with_name("state_loaded.txt"), self.socket_timeout)
-        try:
-            self.ready_path.with_name("state_loaded.txt").unlink()
-        except FileNotFoundError:
-            pass
+        self._unlink_when_released(self.ready_path.with_name("state_loaded.txt"))
+
+    def save_state_to(self, path: str | Path) -> None:
+        """Write the emulator's current state to ``path`` (executed at the next NMI)."""
+        if self.pending_token is not None:
+            raise BridgeError(f"Cannot save state while token {self.pending_token} is pending")
+        ack = self.ready_path.with_name("state_saved.txt")
+        self._unlink_when_released(ack)
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        self._write_command(f"SAVE_TO {Path(path).resolve().as_posix()}\n")
+        self._wait_for(ack, self.socket_timeout)
+        self._unlink_when_released(ack)
+
+    def load_state_from(self, path: str | Path, noop_frames: int = 0) -> None:
+        """Load a state file, then let ``noop_frames`` frames run with no input.
+
+        The random no-op count is what stops a deterministic ROM from replaying
+        the same trajectory every time a savestate is reused.  Follow with
+        ``action()`` / ``recv_observation()`` to get the first observation.
+        """
+        if self.pending_token is not None:
+            raise BridgeError(f"Cannot load state while token {self.pending_token} is pending")
+        ack = self.ready_path.with_name("state_loaded.txt")
+        self._unlink_when_released(ack)  # clear any stale sentinel before commanding
+        self._write_command(f"LOAD_FROM {max(0, int(noop_frames))} {Path(path).resolve().as_posix()}\n")
+        self._wait_for(ack, self.socket_timeout)
+        self._unlink_when_released(ack)  # clear after Mesen writes it (may still be open on Windows)
 
     def recv_observation(self) -> tuple[np.ndarray, float, bool, dict[str, int]]:
         return self._consume_observation()
@@ -472,10 +548,7 @@ class MesenWorker:
         try:
             value = pong.read_text(encoding="ascii").strip()
         finally:
-            try:
-                pong.unlink()
-            except FileNotFoundError:
-                pass
+            self._unlink_when_released(pong)
         if value != "PONG":
             raise BridgeError(f"Unexpected ping response: {value!r}")
 

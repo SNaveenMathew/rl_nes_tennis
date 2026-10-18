@@ -45,3 +45,16 @@ ENV/
 .DS_Store
 Thumbs.db
 configs/base.json
+
+# Recorded human demonstrations (large binary NES savestate + frame data)
+demonstrations/
+
+# Harvested scenario savestates (binary .state files extracted from demos)
+scenario_states/
+
+# Auto-generated scenario catalog (rebuilt by the harvester, not source-of-truth)
+scenario_catalog.json
+
+# Hierarchical policy outputs
+checkpoints_hierarchical/
+runs_hierarchical/
