@@ -32,12 +32,29 @@ def run(bridge_path, script):
         assert wait(f"observation_ready_{tok}.ready"), "no observation"
         return int(open(ipc / f"observation_ready_{tok}.ready", "rb").read().split()[0]) if False else None
     ctx = dict(send=send, wait=wait, step=step, ipc=ipc, state=state, mock=mock)
-    th = threading.Thread(target=lambda: (script(ctx), state.__setitem__("done", True)))
+
+    # Run script-side assertions in a wrapper that always signals completion.
+    # Previously an exception in the helper thread left `done` false, so the
+    # mock emulator kept ticking for 40 seconds and the test later failed with
+    # a misleading KeyError for a result the script never populated.
+    def run_script():
+        try:
+            script(ctx)
+        except BaseException as exc:
+            state["script_exception"] = exc
+        finally:
+            state["done"] = True
+
+    th = threading.Thread(target=run_script, name="state-ops-test-script")
     th.start()
     t0 = time.time()
     while not state["done"] and time.time() - t0 < 40:
         mock.run_frame()
-    th.join(); err = ""
+    th.join()
+    if "script_exception" in state:
+        exc = state["script_exception"]
+        raise AssertionError(f"state-ops script thread failed: {exc!r}") from exc
+    err = ""
     p = ipc / "error.txt"
     if p.exists(): err = p.read_text()
     out = (state, int(mock.frame), int(mock.loaded or 0), err, ipc)
@@ -77,9 +94,14 @@ shutil.rmtree(ipc, ignore_errors=True)
 
 # ---------------- OLD bridge (original upload) ----------------
 def script_old(c):
-    c["step"]("a0"); c["send"]("SV")
+    # This fixture is the original Mesen 0.9.x bridge, whose observation
+    # mailbox protocol is intentionally different from the current bridge.
+    # Do not call c["step"] here: that helper waits for the new bridge's
+    # observation_ready_<token>.ready file, which the legacy fixture never
+    # writes. This regression only verifies that the old savestate API fails
+    # clearly instead of hanging or falsely acknowledging SV.
+    c["send"]("SV")
     c["state"]["acked"] = c["wait"]("state_saved.txt", timeout=1.0)
-    c["step"]("a1")
 st2, frame2, loaded2, err2, ipc2 = run(str(HERE / "fixtures" / "original_bridge.lua"), script_old)
 print("ORIGINAL bridge: SV acknowledged?", st2["acked"], "| error.txt:", repr(err2.strip()))
 assert st2["acked"] is False and "Failed to create savestate" in err2

@@ -94,3 +94,11 @@ The Linux sandbox did not have MesenCE 2.2.1 installed and could not fetch GitHu
 ## Promotion rule
 
 Do not promote a specialist because its loss decreases or because it has high accuracy on constant toy labels. Promote only after held-out human-labeled scenarios show the relevant skill metric improves, paired full-point evaluations show no regression, and results are reported separately for serve/receive roles with enough completed points. For early screening, target at least 100 completed points per checkpoint; for steadier comparisons use 300–500 points and multiple seeds when practical.
+
+## Follow-up: legacy savestate regression harness
+
+The user's next Windows run showed that the current bridge now successfully saved and loaded the new file-based savestate (`STATE|...|binarytail`, two loads, no bridge error), but collection still failed while probing the archived Mesen 0.9.x bridge. That probe incorrectly called the **new** lockstep `step()` helper against the old bridge fixture, which writes the older observation protocol and therefore does not create `observation_ready_<token>.ready`. The failed helper thread never populated `acked`, causing a secondary `KeyError` that obscured the real issue.
+
+The test now sends only the legacy `SV` request when checking the legacy fixture's unsupported savestate API. Its purpose is narrowly to assert that the old API failure is reported clearly; it does not run a current-protocol observation step against an old-protocol fixture. The harness also signals thread completion in a `finally` block and surfaces helper-thread assertion failures promptly instead of waiting up to 40 seconds and failing later with missing dictionary fields.
+
+Sandbox verification after this change: `python -m pytest -q` reports **65 passed, 4 skipped**. The four Lua-dependent tests are skipped because `lupa` is unavailable in this sandbox, so the exact Lua integration case has **not** been executed here. Please rerun the full command on Windows; the expected result is that `test_state_ops_test.py` gets beyond the legacy-protocol probe and completes its new-bridge determinism checks.
