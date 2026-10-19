@@ -10,7 +10,8 @@ def run(bridge_path, script):
     ipc = Path(tempfile.mkdtemp())
     os.environ.update({"MESEN_RL_IPC_DIR": str(ipc), "MESEN_RL_W": "8", "MESEN_RL_H": "8",
         "MESEN_RL_FRAME_SKIP": "4", "MESEN_RL_AUTO_BOOT": "0", "MESEN_RL_LOCKSTEP": "1",
-        "MESEN_RL_LOCKSTEP_TIMEOUT": "20"})
+        "MESEN_RL_LOCKSTEP_TIMEOUT": "20", "MESEN_RL_STRICT_LOCKSTEP": "1",
+        "MESEN_RL_STRICT_WAIT_S": "0.70"})
     lua = lupa.LuaRuntime()
     lua.execute((HERE / "mock_emu.lua").read_text())
     lua.execute(Path(bridge_path).read_text())

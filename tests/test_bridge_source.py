@@ -101,3 +101,11 @@ def test_load_from_noop_completion_is_a_lockstep_frame_barrier():
     wait = block.index("lockstep_wait()", lockstep)
     early_return = block.index("return", wait)
     assert ack < lockstep < wait < early_return
+
+
+def test_strict_lockstep_fails_closed_instead_of_advancing_on_host_delay():
+    source = Path("mesen/bridge.lua").read_text(encoding="utf-8")
+    assert 'MESEN_RL_STRICT_LOCKSTEP") == "1"' in source
+    assert "strict lockstep host-command timeout" in source
+    assert "emu.stop(38)" in source
+    assert "return true  -- soft-lockstep yields one frame" in source

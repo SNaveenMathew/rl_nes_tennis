@@ -172,3 +172,10 @@ Follow [`STAGED_TRAINING_GUIDE.md`](STAGED_TRAINING_GUIDE.md) for the training o
 ### Windows CRLF savestate-path fix
 
 The Lua bridge strips CRLF carriage returns from mailbox commands and normalizes explicit savestate paths. See `IMPLEMENTATION_TEST_REPORT.md` for the regression details and sandbox test results.
+
+
+### Deterministic scenario replay
+
+`tennis_rl.evaluate_scenarios` and `tennis_rl.scenario_preview` launch Mesen workers in strict lockstep. In this mode the bridge does **not** advance a timeout-driven idle frame while waiting for the host's next command; if the host misses the bridge's bounded wait deadline, the worker stops with a clear `strict lockstep host-command timeout` error rather than silently evaluating a different state. The default strict wait is 0.70 seconds so it remains below Mesen's usual 1-second Lua callback limit. Scenario evaluation warms up the model before the first ROM observation to avoid a cold CUDA inference spike.
+
+Ordinary online training retains soft lockstep. This intentionally permits a small number of idle frames during longer learner updates so the Lua callback does not exceed Mesen's script timeout. Do not use soft-lockstep timing as proof of frame-exact replay. To tune strict evaluation, set `strict_lockstep_wait_s` on `MesenWorker` (must remain below the emulator's configured Lua callback timeout); if policies regularly need longer than this bound, optimize/warm up the policy or configure a higher callback timeout in Mesen and adjust the bound conservatively.

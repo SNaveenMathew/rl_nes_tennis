@@ -20,7 +20,8 @@
     "game_level": 1,
     "ipc_dir": "runs/mesen_ipc",
     "transport": "file_mailbox",
-    "capture_stderr": false
+    "capture_stderr": false,
+    "strict_lockstep_wait_s": 0.7
   },
   "environment": {
     "action_count": 27,

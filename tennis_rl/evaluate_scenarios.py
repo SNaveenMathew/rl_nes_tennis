@@ -109,12 +109,23 @@ def main() -> int:
                           stratum=rec.cell_id, phase=rec.phase,
                           state=rec, noop_frames=args.noop_frames)
 
-    workers = build_workers(cfg)
+    # Warm the model before launching strict-lockstep workers. CUDA context and
+    # convolution-kernel initialization can otherwise consume the bridge's
+    # bounded command-wait budget while the new worker waits for its first action.
+    controller = HierarchicalController(model, deterministic=True)
+    warmup_obs = torch.zeros(
+        (1, cfg.environment.stack_size, cfg.mesen.observation_height, cfg.mesen.observation_width),
+        dtype=torch.uint8,
+        device=device,
+    )
+    with torch.inference_mode():
+        controller.act_with_pulse(warmup_obs)
+    controller.reset()
+    workers = build_workers(cfg, strict_lockstep=True)
     env = ParallelTennis(workers, stack_size=cfg.environment.stack_size,
         max_steps=args.point_max_steps, point_episodes=True,
         point_max_steps=args.point_max_steps, scenario_provider=provider,
         segment_mode=False)
-    controller = HierarchicalController(model, deterministic=True)
     output_path = Path(args.out).resolve(); output_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path = Path(args.summary).resolve() if args.summary else output_path.with_suffix(".summary.json")
     overall = Counter(); by_scenario: dict[str, Counter] = defaultdict(Counter)

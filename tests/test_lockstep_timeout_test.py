@@ -11,7 +11,8 @@ BRIDGE = str(ROOT / "mesen" / "bridge.lua")
 def run(delays, slice_s=None, frame_skip=4):
     ipc = Path(tempfile.mkdtemp())
     env = {"MESEN_RL_IPC_DIR": str(ipc), "MESEN_RL_W": "8", "MESEN_RL_H": "8", "MESEN_RL_FRAME_SKIP": str(frame_skip),
-           "MESEN_RL_AUTO_BOOT": "0", "MESEN_RL_LOCKSTEP": "1", "MESEN_RL_LOCKSTEP_TIMEOUT": "600"}
+           "MESEN_RL_AUTO_BOOT": "0", "MESEN_RL_LOCKSTEP": "1", "MESEN_RL_LOCKSTEP_TIMEOUT": "600",
+           "MESEN_RL_STRICT_LOCKSTEP": "0"}
     if slice_s is not None: env["MESEN_RL_LOCKSTEP_SLICE"] = str(slice_s)
     os.environ.pop("MESEN_RL_LOCKSTEP_SLICE", None); os.environ.update(env)
     lua = lupa.LuaRuntime()

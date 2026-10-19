@@ -52,6 +52,15 @@ local LOCKSTEP = (os.getenv("MESEN_RL_LOCKSTEP") ~= "0") and not RECORD_MODE
 local LOCKSTEP_SLICE_S = tonumber(os.getenv("MESEN_RL_LOCKSTEP_SLICE") or "0.25")
 -- An orphaned emulator (host crashed) stops itself after this many silent seconds.
 local LOCKSTEP_TIMEOUT_S = tonumber(os.getenv("MESEN_RL_LOCKSTEP_TIMEOUT") or "600")
+-- Strict mode is intended for deterministic scenario replay/evaluation, where
+-- allowing even one timeout-driven idle frame changes the evaluated state.  It
+-- waits for the next host command rather than advancing the emulator; if the
+-- host does not respond before this deadline, it fails closed instead of
+-- silently advancing a variable number of frames. Keep this below Mesen's Lua
+-- callback timeout (usually 1s). Online training leaves this disabled because
+-- PPO update time can be longer than one callback budget.
+local STRICT_LOCKSTEP = os.getenv("MESEN_RL_STRICT_LOCKSTEP") == "1"
+local STRICT_LOCKSTEP_WAIT_S = tonumber(os.getenv("MESEN_RL_STRICT_WAIT_S") or "0.70")
 -- NES renders a fixed 256x240 framebuffer for this game.
 local SRC_W = 256
 local SRC_H = 240
@@ -713,6 +722,7 @@ local function write_api_info()
     end
     lines[#lines + 1] = "savestate function: " .. (emu.saveSavestate and "saveSavestate" or (emu.createSavestate and "createSavestate" or "NONE"))
     lines[#lines + 1] = "lockstep=" .. tostring(LOCKSTEP) .. " slice=" .. tostring(LOCKSTEP_SLICE_S) .. "s"
+    lines[#lines + 1] = "strict_lockstep=" .. tostring(STRICT_LOCKSTEP) .. " wait=" .. tostring(STRICT_LOCKSTEP_WAIT_S) .. "s"
     write_text(IPC_DIR .. "/api_info.txt", table.concat(lines, "\n") .. "\n")
 end
 
@@ -729,30 +739,48 @@ local function needs_frames()
 end
 
 local function lockstep_wait()
-    if not LOCKSTEP or needs_frames() then return end
+    if not LOCKSTEP or needs_frames() then return true end
     local t0 = os.clock()
     local spins = 0
     while not stopped do
         local line = read_command()
         if line then
             apply_command(line)
-            if step_pending or has_held_button() or needs_frames() then return end
+            if stopped then return false end
+            if step_pending or has_held_button() or needs_frames() then return true end
             t0 = os.clock()  -- e.g. PING: keep waiting for a real step
         else
             spins = spins + 1
             if spins >= 32 then
                 spins = 0
-                if os.clock() - t0 >= LOCKSTEP_SLICE_S then
+                local elapsed = os.clock() - t0
+                if STRICT_LOCKSTEP then
+                    -- Scenario evaluation must be reproducible. A timeout-driven
+                    -- frame here would silently alter the next action's state, so
+                    -- stop and surface an explicit error instead of drifting.
+                    if elapsed >= STRICT_LOCKSTEP_WAIT_S then
+                        local msg = string.format(
+                            "strict lockstep host-command timeout after %.3fs; emulator stopped to preserve replay determinism",
+                            elapsed
+                        )
+                        report_error(msg)
+                        stopped = true
+                        pcall(function() emu.stop(38) end)
+                        return false
+                    end
+                elseif elapsed >= LOCKSTEP_SLICE_S then
                     if os.time() - last_host_activity > LOCKSTEP_TIMEOUT_S then
                         stopped = true
                         report_error("host silent for " .. tostring(LOCKSTEP_TIMEOUT_S) .. "s; stopping emulator")
                         emu.stop(36)
+                        return false
                     end
-                    return  -- let one frame run, then wait again (stays under Mesen's script timeout)
+                    return true  -- soft-lockstep yields one frame to avoid timing out learner updates
                 end
             end
         end
     end
+    return false
 end
 
 local end_callback = emu.addEventCallback(function()
@@ -797,7 +825,8 @@ local end_callback = emu.addEventCallback(function()
         -- serialization) remains limited to FRAME_SKIP frames below.
         if LOCKSTEP and not step_pending and not has_held_button() and not needs_frames() then
             -- Idle (after boot / between steps): don't let the game run ahead of the host.
-            lockstep_wait()
+            local wait_ok = lockstep_wait()
+            if not wait_ok or stopped then return end
         else
             poll_command()
         end

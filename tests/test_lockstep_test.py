@@ -12,7 +12,7 @@ def run(lockstep: bool, host_delays, frame_skip=4):
         "MESEN_RL_IPC_DIR": str(ipc), "MESEN_RL_W": "8", "MESEN_RL_H": "8",
         "MESEN_RL_FRAME_SKIP": str(frame_skip), "MESEN_RL_AUTO_BOOT": "0",
         "MESEN_RL_LOCKSTEP": "1" if lockstep else "0",
-        "MESEN_RL_LOCKSTEP_TIMEOUT": "20",
+        "MESEN_RL_LOCKSTEP_TIMEOUT": "20", "MESEN_RL_STRICT_LOCKSTEP": "0",
     })
     lua = lupa.LuaRuntime(unpack_returned_tuples=True)
     state = {"frames": 0, "stopped": None, "inputs": []}

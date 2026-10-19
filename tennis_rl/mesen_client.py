@@ -50,6 +50,8 @@ class MesenWorker:
         record_mode: bool = False,
         lockstep: bool = True,
         lockstep_timeout_s: float = 600.0,
+        strict_lockstep: bool = False,
+        strict_lockstep_wait_s: float = 0.70,
     ) -> None:
         # host/port are retained for config backward compatibility; transport is
         # now local filesystem IPC and never opens a TCP socket.
@@ -84,6 +86,10 @@ class MesenWorker:
         # Never used while a human is playing (record mode).
         self.lockstep = bool(lockstep) and not self.record_mode
         self.lockstep_timeout_s = float(lockstep_timeout_s)
+        self.strict_lockstep = bool(strict_lockstep) and self.lockstep
+        self.strict_lockstep_wait_s = float(strict_lockstep_wait_s)
+        if not 0.05 <= self.strict_lockstep_wait_s < 0.90:
+            raise ValueError("strict_lockstep_wait_s must be between 0.05s and 0.90s, below Mesen's default Lua callback timeout")
 
         base = Path(ipc_dir or (Path("runs") / "mesen_ipc"))
         # Never reuse a mailbox directory across launches. This prevents stale
@@ -159,6 +165,8 @@ class MesenWorker:
             "MESEN_RL_RECORD_MODE": "1" if self.record_mode else "0",
             "MESEN_RL_LOCKSTEP": "1" if self.lockstep else "0",
             "MESEN_RL_LOCKSTEP_TIMEOUT": str(int(self.lockstep_timeout_s)),
+            "MESEN_RL_STRICT_LOCKSTEP": "1" if self.strict_lockstep else "0",
+            "MESEN_RL_STRICT_WAIT_S": str(self.strict_lockstep_wait_s),
         })
 
         creationflags = 0

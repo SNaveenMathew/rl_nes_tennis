@@ -32,6 +32,9 @@ class MesenConfig:
     # (deterministic frame timing). Ignored for human recording.
     lockstep: bool = True
     lockstep_timeout_s: float = 600.0
+    # Strictly frame-deterministic scenario evaluation must fail closed rather
+    # than advancing on host latency. Keep below Mesen's callback timeout.
+    strict_lockstep_wait_s: float = 0.70
 
 
 @dataclass
