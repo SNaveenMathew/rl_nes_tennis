@@ -753,6 +753,16 @@ local function lockstep_wait()
             spins = spins + 1
             if spins >= 32 then
                 spins = 0
+                -- Lupa-based tests embed Lua in the same process as the Python
+                -- host thread. Some Lupa builds keep the GIL while executing Lua,
+                -- so a pure Lua busy loop can prevent the host thread from writing
+                -- command.in until STRICT_LOCKSTEP_WAIT_S expires. Production
+                -- Mesen runs in a separate process and never defines this hook.
+                -- In the test harness only, briefly yield the Python scheduler to
+                -- model the independent host process without advancing emulated
+                -- time or weakening the strict deadline.
+                local test_yield = rawget(_G, "__MESEN_RL_TEST_YIELD")
+                if type(test_yield) == "function" then pcall(test_yield) end
                 local elapsed = os.clock() - t0
                 if STRICT_LOCKSTEP then
                     -- Scenario evaluation must be reproducible. A timeout-driven

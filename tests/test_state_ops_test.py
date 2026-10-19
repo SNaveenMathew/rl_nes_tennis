@@ -9,11 +9,11 @@ ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
 from lua_test_support import install_lua_test_environment
 
-def run(bridge_path, script):
+def run(bridge_path, script, *, strict=False):
     ipc = Path(tempfile.mkdtemp())
     env = {"MESEN_RL_IPC_DIR": str(ipc), "MESEN_RL_W": "8", "MESEN_RL_H": "8",
         "MESEN_RL_FRAME_SKIP": "4", "MESEN_RL_AUTO_BOOT": "0", "MESEN_RL_LOCKSTEP": "1",
-        "MESEN_RL_LOCKSTEP_TIMEOUT": "20", "MESEN_RL_STRICT_LOCKSTEP": "1",
+        "MESEN_RL_LOCKSTEP_TIMEOUT": "20", "MESEN_RL_STRICT_LOCKSTEP": "1" if strict else "0",
         "MESEN_RL_STRICT_WAIT_S": "0.70"}
     os.environ.update(env)
     # The record-mode test runs during pytest collection and leaves its process
@@ -22,15 +22,22 @@ def run(bridge_path, script):
     # It also avoids relying on embedded Lua seeing Python runtime env changes.
     lua = lupa.LuaRuntime()
     install_lua_test_environment(lua, env)
+    if strict:
+        # The embedded-Lua test and host thread share a Python process. Yield the
+        # Python scheduler during strict lockstep polling so the host can publish
+        # its next command, just as it can when Mesen runs in a separate process.
+        # This does not advance mock emulator frames and does not relax the strict
+        # frame-boundary semantics or timeout.
+        lua.globals()["__MESEN_RL_TEST_YIELD"] = lambda: time.sleep(0.001)
     lua.execute((HERE / "mock_emu.lua").read_text())
     lua.execute(Path(bridge_path).read_text())
     mock = lua.globals().mock
     api_info = (ipc / "api_info.txt").read_text(encoding="utf-8")
     if bridge_path == str(ROOT / "mesen" / "bridge.lua"):
-        assert "lockstep=true" in api_info and "strict_lockstep=true" in api_info, (
-            "test configuration did not reach Lua; refusing to run replay determinism "
-            "checks unless BOTH lockstep and strict lockstep are active. "
-            f"api_info.txt:\n{api_info}"
+        expected_strict = "strict_lockstep=true" if strict else "strict_lockstep=false"
+        assert "lockstep=true" in api_info and expected_strict in api_info, (
+            "test configuration did not reach Lua; expected lockstep plus "
+            f"{expected_strict}. api_info.txt:\n{api_info}"
         )
     state = {"done": False, "log": []}
 
@@ -153,7 +160,7 @@ def script_det(c):
         __import__("time").sleep(0.15); c["step"](f"s{i}"); cur = snap(f"p{i+1}"); gaps.append(cur - prev); prev = cur
     for _ in range(3): c["step"]("idle")
     st["det"] = dict(base=f0, loads=loads, zero=zero, gaps=gaps)
-st3, _, _, err3, ipc3 = run(str(ROOT / "mesen" / "bridge.lua"), script_det)
+st3, _, _, err3, ipc3 = run(str(ROOT / "mesen" / "bridge.lua"), script_det, strict=True)
 d = st3["det"]; d["armed_when_idle"] = int(st3.get("active_callbacks", 0)); print("determinism:", d, "| error:", repr(err3))
 assert d["armed_when_idle"] == 0, "savestate callback leaked while idle"
 assert not err3, f"bridge emitted an error during replay determinism test: {err3!r}"
