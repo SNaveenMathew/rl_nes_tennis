@@ -102,3 +102,27 @@ The user's next Windows run showed that the current bridge now successfully save
 The test now sends only the legacy `SV` request when checking the legacy fixture's unsupported savestate API. Its purpose is narrowly to assert that the old API failure is reported clearly; it does not run a current-protocol observation step against an old-protocol fixture. The harness also signals thread completion in a `finally` block and surfaces helper-thread assertion failures promptly instead of waiting up to 40 seconds and failing later with missing dictionary fields.
 
 Sandbox verification after this change: `python -m pytest -q` reports **65 passed, 4 skipped**. The four Lua-dependent tests are skipped because `lupa` is unavailable in this sandbox, so the exact Lua integration case has **not** been executed here. Please rerun the full command on Windows; the expected result is that `test_state_ops_test.py` gets beyond the legacy-protocol probe and completes its new-bridge determinism checks.
+
+
+## Follow-up: nondeterministic scenario replay frame count
+
+The next Windows report showed that saved-state writes/loads were now successful but repeated `LOAD_FROM 7` trials saved at different frames. Root cause: the bridge acknowledged completion of its requested no-op horizon from `endFrame`, then returned to the main callback. Because the host can only post the next command asynchronously, lockstep timeout slices could let additional idle frames elapse before the next `SAVE_TO` was consumed. This made scenario replay depend on host scheduling latency.
+
+The bridge now treats the end of the requested no-op horizon as a lockstep barrier: it acknowledges the load, waits for the next command in the same `endFrame` callback, and returns before the current frame can be reused as an action/hold frame. A following state operation executes at the next `startFrame`; a newly received action starts counting on the next actual frame. The regression assertions have been strengthened: three `LOAD_FROM 7` + `SAVE_TO` trials must save at exactly `base_frame + 7`, and `LOAD_FROM 0` must save at `base_frame + 1` under the documented mock protocol.
+
+Because the Python `lupa` package is not installed in this sandbox and package network access is unavailable, I exercised the real `mesen/bridge.lua` and existing `tests/mock_emu.lua` directly through the system Lua 5.4 shared library using a small external `ctypes` host harness that reproduced the command/ack sequence. Five independent runs returned `base=12`, `loads=[19,19,19]`, and `zero=13`; the exact assertions passed in all five runs. This is a Lua 5.4 mock-emulator regression run, not a MesenCE GUI/ROM integration test. The regular Python suite and source-level barrier regression are run separately and the Windows Lupa-backed determinism test should be rerun on the user's machine.
+
+
+## Follow-up: stable acknowledgement for `LOAD_FROM 0` and token reuse
+
+The replay barrier is now applied consistently to both `LOAD_FROM 0` and `LOAD_FROM N` where N is positive. All file-based `LOAD_FROM` operations set `noop_ack_pending`; `needs_frames()` remains true through the replay horizon; and the bridge writes `state_loaded.txt` only at the end-frame boundary. It then waits for the next host command before returning from that callback. This avoids a race in which `LOAD_FROM 0` could be acknowledged during `startFrame` and allow extra frames to elapse while the host issued the next command. It also avoids counting the terminal replay frame as part of an action that was only received after that frame's input poll. The state reset clears action/pulse and held-button tracking before replayed frames are simulated.
+
+The determinism test now asserts exact outcomes rather than a weak `loads`-are-equal condition: three `LOAD_FROM 7` runs must save at `base + 7`, `LOAD_FROM 0` must save at `base + 1` in the mock callback model, and the four-frame action-step gaps must all be equal. The `step()` helper deletes a previous `observation_ready_<token>.ready` before reusing a token, preventing an old marker from falsely satisfying the next wait.
+
+Validation in this sandbox:
+
+- `python -m compileall -q tennis_rl tests`: passed.
+- `python -m pytest -q`: **66 passed, 4 skipped**. The skipped tests are protected by `pytest.importorskip("lupa")` because this sandbox does not have the Python `lupa` binding and package-network access is unavailable.
+- An external `ctypes` harness executed the repository's actual `mesen/bridge.lua` and `tests/mock_emu.lua` using the system Lua 5.4 shared library and reproduced the restore/step protocol in five independent runs. Every run produced `base=12`, `loads=[19,19,19]`, `zero=13`, `gaps=[4,4,4,4]`, and `loaded=4`; the exact assertions passed all five times. This covers the Lua bridge logic against the repository mock, but is not a live MesenCE/ROM integration test.
+
+Please rerun `python -m pytest -q` on Windows. The expected result is that the state-operations determinism check no longer reports divergent load frames; the actual Windows/Lupa suite and MesenCE 2.2.1 integration still need confirmation on the target laptop.

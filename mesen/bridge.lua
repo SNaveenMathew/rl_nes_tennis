@@ -670,8 +670,12 @@ local function perform_state_op()
         end
         if ok and loaded ~= false then
             reset_tracking()
-            if op.kind == "load_from" and (op.noop or 0) > 0 then
-                noop_remaining = op.noop
+            if op.kind == "load_from" then
+                -- A LOAD_FROM acknowledgement denotes a stable replay boundary for
+                -- both N=0 and N>0. Defer it to endFrame so the bridge can hold the
+                -- post-load frame boundary until the host posts its next command.
+                -- This also avoids the old N=0 path racing ahead while the host wakes.
+                noop_remaining = math.max(0, math.floor(op.noop or 0))
                 noop_ack_pending = true
             else
                 write_text(IPC_DIR .. "/state_loaded.txt", "LOADED\n")
@@ -721,7 +725,7 @@ end
 
 -- True while the emulator must keep running frames even though no step is pending.
 local function needs_frames()
-    return pending_op ~= nil or snapshot_pending or noop_remaining > 0
+    return pending_op ~= nil or snapshot_pending or noop_remaining > 0 or noop_ack_pending
 end
 
 local function lockstep_wait()
@@ -822,10 +826,20 @@ local end_callback = emu.addEventCallback(function()
         if noop_remaining > 0 then
             current_action = 0
             noop_remaining = noop_remaining - 1
-            if noop_remaining == 0 and noop_ack_pending then
-                noop_ack_pending = false
-                write_text(IPC_DIR .. "/state_loaded.txt", "LOADED\n")
+        end
+
+        -- Acknowledge LOAD_FROM only at a stable end-of-frame boundary, including
+        -- LOAD_FROM 0. Without this barrier, the host may wake after an ack while
+        -- lockstep timeout slices let arbitrary idle frames elapse. Commands latched
+        -- here take effect at the next startFrame, and this boundary is never counted
+        -- as part of a newly received action or HOLD duration.
+        if noop_remaining == 0 and noop_ack_pending then
+            noop_ack_pending = false
+            write_text(IPC_DIR .. "/state_loaded.txt", "LOADED\n")
+            if LOCKSTEP then
+                lockstep_wait()
             end
+            return
         end
 
         -- Count down precise A/B pulses per emulated NES frame. Movement remains

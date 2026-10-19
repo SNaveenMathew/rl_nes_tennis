@@ -88,3 +88,16 @@ def test_bridge_normalizes_windows_crlf_and_savestate_paths():
     assert "normalize_file_path(rest)" in source
     assert "normalize_file_path(path)" in source
     assert 'local IPC_DIR = (os.getenv("MESEN_RL_IPC_DIR") or "runs/mesen_ipc/worker"):gsub("\\\\", "/")' in source
+
+
+def test_load_from_noop_completion_is_a_lockstep_frame_barrier():
+    """Do not let asynchronous host wake-up add arbitrary frames after replay."""
+    source = Path("mesen/bridge.lua").read_text(encoding="utf-8")
+    start = source.index("-- No-op frames after LOAD_FROM run free")
+    end = source.index("-- Count down precise A/B pulses", start)
+    block = source[start:end]
+    ack = block.index('write_text(IPC_DIR .. "/state_loaded.txt", "LOADED\\n")')
+    lockstep = block.index("if LOCKSTEP then", ack)
+    wait = block.index("lockstep_wait()", lockstep)
+    early_return = block.index("return", wait)
+    assert ack < lockstep < wait < early_return

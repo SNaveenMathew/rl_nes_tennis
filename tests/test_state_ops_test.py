@@ -28,6 +28,11 @@ def run(bridge_path, script):
     def frame_of_obs():  # emulator frame at the moment an observation was published
         return int(mock.frame)
     def step(tok):
+        # Tests deliberately reuse the "idle" token below. Remove the prior ready
+        # marker before issuing a new command so an old marker cannot satisfy the
+        # next wait before the new observation has been produced.
+        ready = ipc / f"observation_ready_{tok}.ready"
+        ready.unlink(missing_ok=True)
         send(f"A {tok} 0")
         assert wait(f"observation_ready_{tok}.ready"), "no observation"
         return int(open(ipc / f"observation_ready_{tok}.ready", "rb").read().split()[0]) if False else None
@@ -134,8 +139,15 @@ def script_det(c):
 st3, _, _, err3, ipc3 = run(str(ROOT / "mesen" / "bridge.lua"), script_det)
 d = st3["det"]; print("determinism:", d, "| error:", repr(err3))
 assert d["armed_when_idle"] == 0, "savestate callback leaked while idle"
-assert not err3 and len(set(d["loads"])) == 1, "same state + same no-op count must land on the same frame"
+assert not err3, f"bridge emitted an error during replay determinism test: {err3!r}"
+assert d["loads"] == [d["base"] + 7] * 3, (
+    "LOAD_FROM 7 must always run exactly seven no-op frames before the next saved state; "
+    f"base={d['base']} loads={d['loads']}"
+)
+assert d["zero"] == d["base"] + 1, (
+    "LOAD_FROM 0 should restore the base state, then acknowledge the next startFrame boundary; "
+    f"base={d['base']} zero={d['zero']}"
+)
 assert len(set(d["gaps"])) == 1, "every step must advance the emulator by the same number of frames"
-assert d["loads"][0] - d["zero"] == 7 - 1 + 0 or d["loads"][0] > d["zero"]
 shutil.rmtree(ipc3, ignore_errors=True)
 print("DETERMINISM OK")
