@@ -168,9 +168,11 @@ def test_segment_rtg_calculation_protects_rally_in_lost_points():
     rtg_loss = _compute_point_rtg(ep_loss, gamma=0.99)
     # Terminal frame should be negative
     assert rtg_loss[-1] == -1.0
-    # Early/mid rally frames before the blunder (first 35 steps) should be positive continuation credit (+0.15)
-    assert rtg_loss[0] == 0.15
-    assert rtg_loss[20] == 0.15
+    # Return-to-go must reflect only recorded rewards. There is no invented
+    # positive continuation bonus for frames from a point that was lost.
+    assert np.isclose(rtg_loss[0], -(0.99 ** 59), atol=1e-6)
+    assert np.isclose(rtg_loss[20], -(0.99 ** 39), atol=1e-6)
+    assert np.all(rtg_loss <= 0.0)
 
 
 def test_stratified_segment_extraction_and_losses(tmp_path):
@@ -185,15 +187,14 @@ def test_stratified_segment_extraction_and_losses(tmp_path):
     cfg = SegmentReplayConfig(seg_len=16, batch_size=8, serve_lead_steps=12, late_lead_steps=25)
     replayer = DemoSegmentReplayer(dataset, model, device, cfg=cfg)
 
-    # Check segment types present in pool
-    assert len(replayer._by_type["serve"]) > 0, "Should have serve segments"
-    assert len(replayer._by_type["stroke"]) > 0, "Should have stroke segments"
+    # No task_annotations.jsonl exists in this fixture, so task types must be
+    # unlabeled rather than guessed from point position or action frequency.
+    assert len(replayer._by_type["unlabeled"]) > 0
+    assert set(replayer._by_type) == {"unlabeled"}
 
-    # Sample batch
     batch = replayer.sample_batch(batch_size=8)
     assert len(batch) == 8
-    types_in_batch = {s.seg_type for s in batch}
-    assert "serve" in types_in_batch or "stroke" in types_in_batch
+    assert {s.seg_type for s in batch} == {"unlabeled"}
 
     # Compute differentiable losses
     bc_loss, outcome_loss = replayer.compute_losses(model, batch)

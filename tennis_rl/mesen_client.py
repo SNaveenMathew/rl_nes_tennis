@@ -431,6 +431,8 @@ class MesenWorker:
         opponent_games = int(parts[7])
         point_end = int(parts[8])
         human_action = int(parts[9]) if len(parts) >= 10 else 0
+        a_pulse_frames = int(parts[10]) if len(parts) >= 11 else -1
+        b_pulse_frames = int(parts[11]) if len(parts) >= 12 else -1
 
         expected = self.width * self.height
         if len(payload) != expected:
@@ -451,15 +453,28 @@ class MesenWorker:
             "point_end": point_end,
             "token": token,
             "human_action": human_action,
+            "a_pulse_frames": a_pulse_frames,
+            "b_pulse_frames": b_pulse_frames,
         }
         return image, reward, done, info
 
-    def action(self, action: int) -> None:
+    @property
+    def supports_button_pulses(self) -> bool:
+        """The bundled bridge supports optional raw-NES-frame A/B button pulses."""
+        return True
+
+    def action(self, action: int, pulse_frames: int | None = None) -> None:
         if self.pending_token is not None:
             raise BridgeError(f"Cannot send action while token {self.pending_token} is pending")
+        action = int(action)
+        if not 0 <= action < 27:
+            raise ValueError(f"Invalid NES Tennis action ID {action}; expected 0..26")
+        if pulse_frames is not None and int(pulse_frames) < 1:
+            raise ValueError("pulse_frames must be positive when supplied")
         token = self._new_token()
         self.pending_token = token
-        self._write_command(f"A {token} {int(action)}\n")
+        suffix = "" if pulse_frames is None else f" {int(pulse_frames)}"
+        self._write_command(f"A {token} {action}{suffix}\n")
 
     def reset(self) -> None:
         # Never call emu.reset() from a Mesen frame callback. Restart the

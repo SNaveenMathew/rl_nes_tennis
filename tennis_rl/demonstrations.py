@@ -19,11 +19,12 @@ class PointEpisode:
     actions: np.ndarray
     rewards: np.ndarray
     dones: np.ndarray
-    outcome: str  # "winning" or "losing"
+    outcome: str  # "winning" | "losing" | "unknown"
     level: int
     match_id: str
     point_index: int
     match_outcome: str = ""  # outcome of the whole recorded game (legacy label)
+    pulse_frames: np.ndarray | None = None  # raw button-hold frames per observation; -1 = unknown
 
     @property
     def length(self) -> int:
@@ -31,7 +32,7 @@ class PointEpisode:
 
     @property
     def point_target(self) -> float:
-        return 1.0 if self.outcome == "winning" else 0.0
+        return 1.0 if self.outcome == "winning" else (0.0 if self.outcome == "losing" else -1.0)
 
 
 @dataclass(frozen=True)
@@ -67,7 +68,12 @@ def _safe_load(path: Path, outcome_source: str = "point") -> PointEpisode | None
             point_index = int(np.asarray(data["point_index"]).item())
             match_id = str(np.asarray(data["match_id"]).item())
             outcome = str(np.asarray(data["outcome"]).item())
-        if outcome not in {"winning", "losing"}:
+            pulse_frames = np.asarray(data["pulse_frames"], dtype=np.int16) if "pulse_frames" in data else None
+        # The NPZ's stored outcome is normally the whole match/game result.
+        # For point-level learning, use the point's own reward only. A zero-sum
+        # point with no terminal reward is UNKNOWN; never infer the point outcome
+        # from its containing match's result.
+        if outcome_source not in {"point", "match"}:
             return None
         if observations.ndim != 4 or actions.ndim != 1:
             return None
@@ -77,20 +83,24 @@ def _safe_load(path: Path, outcome_source: str = "point") -> PointEpisode | None
             return None
         if rewards.shape != actions.shape or dones.shape != actions.shape:
             return None
+        if pulse_frames is not None and pulse_frames.shape != actions.shape:
+            return None
+        if pulse_frames is None:
+            pulse_frames = np.full(actions.shape, -1, dtype=np.int16)
         if np.any((actions < 0) | (actions >= len(ACTION_NAMES))):
             return None
-        match_outcome = outcome
+        match_outcome = outcome if outcome in {"winning", "losing"} else "unknown"
         if outcome_source == "point":
-            # The stored ``outcome`` is the result of the whole recorded game, so a
-            # point won inside a lost game was being labelled "losing" (and the
-            # reverse).  The sign of the point's own reward is the real result;
-            # zero-reward segments (no score change) keep the legacy label.
             total = float(rewards.sum())
             if total > 1e-6:
                 outcome = "winning"
             elif total < -1e-6:
                 outcome = "losing"
-        return PointEpisode(path, observations, actions, rewards, dones, outcome, level, match_id, point_index, match_outcome)
+            else:
+                outcome = "unknown"
+        elif outcome not in {"winning", "losing"}:
+            outcome = "unknown"
+        return PointEpisode(path, observations, actions, rewards, dones, outcome, level, match_id, point_index, match_outcome, pulse_frames)
     except (OSError, ValueError, KeyError, TypeError):
         return None
 
@@ -147,7 +157,9 @@ class DemonstrationDataset:
         if not self.episodes:
             return []
         weights = np.asarray([
-            self.winning_weight if ep.outcome == "winning" else self.losing_weight
+            self.winning_weight if ep.outcome == "winning" else (
+                self.losing_weight if ep.outcome == "losing" else 1.0
+            )
             for ep in self.episodes
         ], dtype=np.float64)
         weights /= weights.sum()
@@ -177,10 +189,9 @@ class DemonstrationDataset:
             if np.max(np.abs(rtg)) > 1e-6:
                 scale = float(np.max(np.abs(rtg)))
                 rtg = np.clip(rtg / scale, -1.0, 1.0)
-            else:
-                # Sparse point rewards can be outside a short window. The
-                # point outcome still supplies the coarse partial-episode label.
-                rtg.fill(1.0 if ep.outcome == "winning" else -1.0)
+            # Do not fabricate a return when the true point reward is outside
+            # this window. The auxiliary outcome label below is separately masked
+            # when the point result itself is unknown.
             windows.append(DemoWindow(
                 observations=obs,
                 actions=actions,
@@ -256,10 +267,12 @@ def partial_supervision_losses(model: RecurrentActorCritic, obs: torch.Tensor, a
     bc_weight = base * local_weight
     bc_denom = bc_weight.sum().clamp_min(1.0)
     bc_loss = -(logp * bc_weight).sum() / bc_denom
+    known_outcome = mask.bool() & (outcome_target >= 0)
+    safe_targets = outcome_target.clamp(0.0, 1.0)
     outcome_bce = nn.functional.binary_cross_entropy_with_logits(
-        outcome_logits, outcome_target, reduction="none"
+        outcome_logits, safe_targets, reduction="none"
     )
-    outcome_loss = (outcome_bce * mask.float()).sum() / mask.float().sum().clamp_min(1.0)
+    outcome_loss = (outcome_bce * known_outcome.float()).sum() / known_outcome.float().sum().clamp_min(1.0)
     return bc_loss, outcome_loss
 
 
@@ -270,6 +283,7 @@ def summarize(root: str | Path) -> dict[str, int]:
         key = f"level_{ep.level}_{ep.outcome}"
         levels[key] = levels.get(key, 0) + 1
     return {"points": len(ds), "winning_points": ds.winning_points, "losing_points": ds.losing_points,
+            "unknown_points": sum(ep.outcome == "unknown" for ep in ds.episodes),
             "steps": ds.total_steps, **levels}
 
 

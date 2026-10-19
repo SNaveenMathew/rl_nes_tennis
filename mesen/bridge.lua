@@ -81,6 +81,8 @@ local RAM_OPPONENT_GAMES = 0x005A
 local RAM_POINT_END = 0x0072
 
 local current_action = 0
+local current_pulse_frames = -1 -- -1 = legacy button hold; positive = pulse A/B for N NES frames
+local current_pulse_remaining = 0
 local frame_counter = 0
 local step_pending = false
 local pending_token = nil
@@ -125,6 +127,8 @@ local noop_ack_pending = false
 local state_op_wait = 0
 local human_action = 0
 local interval_action = 0
+local interval_a_frames = 0
+local interval_b_frames = 0
 
 local BUTTONS = {
     left = false,
@@ -190,13 +194,20 @@ local function apply_command(line)
     if not line then return false end
     local cmd, rest = line:match("^(%S+)%s*(.*)$")
     if cmd == "A" then
-        local token, action_text = rest:match("^(%S+)%s+(%S+)$")
+        local token, action_text, pulse_text = rest:match("^(%S+)%s+(%S+)%s*(%S*)$")
         local action = tonumber(action_text)
-        if token and action and ACTIONS[action + 1] then
+        local pulse = nil
+        if pulse_text and pulse_text ~= "" then pulse = tonumber(pulse_text) end
+        if token and action and ACTIONS[action + 1]
+            and (pulse == nil or (pulse >= 1 and pulse <= FRAME_SKIP)) then
             current_action = action
+            current_pulse_frames = pulse or -1
+            current_pulse_remaining = (pulse and pulse > 0) and pulse or 0
             pending_token = token
             step_pending = true
             frame_counter = 0
+        elseif token and action and ACTIONS[action + 1] then
+            report_error("Invalid A/B pulse frame count; expected 1..FRAME_SKIP")
         end
     elseif cmd == "R" then
         -- Reset to the post-boot match start (restored at the next startFrame).
@@ -310,7 +321,13 @@ local function current_input()
         return BUTTONS
     end
     local buttons = ACTIONS[current_action + 1] or ACTIONS[1]
-    for _, name in ipairs(buttons) do BUTTONS[name] = true end
+    for _, name in ipairs(buttons) do
+        if name ~= "a" and name ~= "b" then
+            BUTTONS[name] = true
+        elseif current_pulse_frames < 0 or current_pulse_remaining > 0 then
+            BUTTONS[name] = true
+        end
+    end
     return BUTTONS
 end
 
@@ -461,8 +478,9 @@ local function send_observation()
     local header
     if RECORD_MODE then
         header = string.format(
-            "O %s %.6f %d %d %d %d %d %d %d\n",
-            token, reward, done and 1 or 0, player_score, player_games, opponent_score, opponent_games, point_end, interval_action
+            "O %s %.6f %d %d %d %d %d %d %d %d %d\n",
+            token, reward, done and 1 or 0, player_score, player_games, opponent_score, opponent_games,
+            point_end, interval_action, interval_a_frames, interval_b_frames
         )
     else
         header = string.format(
@@ -472,6 +490,8 @@ local function send_observation()
     end
     if RECORD_MODE then
         interval_action = 0
+        interval_a_frames = 0
+        interval_b_frames = 0
     end
     local suffix = token
     local obs_path = OBS_PREFIX .. suffix .. ".bin"
@@ -534,6 +554,8 @@ local function reset_tracking()
     step_pending = false
     pending_token = nil
     current_action = 0
+    current_pulse_frames = -1
+    current_pulse_remaining = 0
     actual_player_games = 0
     actual_opponent_games = 0
     max_player_score_seen = 0
@@ -786,6 +808,12 @@ local end_callback = emu.addEventCallback(function()
                 noop_ack_pending = false
                 write_text(IPC_DIR .. "/state_loaded.txt", "LOADED\n")
             end
+        end
+
+        -- Count down precise A/B pulses per emulated NES frame. Movement remains
+        -- held for the complete observation interval.
+        if current_pulse_frames > 0 and current_pulse_remaining > 0 then
+            current_pulse_remaining = current_pulse_remaining - 1
         end
 
         -- Count down held-button frames (HOLD/START commands from watch.py).

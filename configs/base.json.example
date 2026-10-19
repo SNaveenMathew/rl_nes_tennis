@@ -108,13 +108,19 @@
   "hierarchical": {
     "enabled": true,
     "skills": [
-      "serve",
-      "receive",
-      "baseline",
+      "serve_timing",
+      "serve_placement_power",
+      "serve_recovery",
+      "receive_position",
+      "return_stroke_timing",
+      "intercept_track",
+      "hold_cover",
+      "recover_reposition",
       "approach_net",
-      "recover",
-      "shot",
-      "wait"
+      "retreat_lob",
+      "stroke_selector",
+      "stroke_timing",
+      "transition_wait_reposition"
     ],
     "durations": [
       1,
@@ -139,7 +145,12 @@
     "max_step_checkpoints": 3,
     "save_dir": "checkpoints_hierarchical",
     "log_dir": "runs_hierarchical",
-    "use_verified_start_role_labels": true
+    "use_verified_start_role_labels": true,
+    "button_pulse_durations": [
+      1,
+      2,
+      4
+    ]
   },
   "scenario": {
     "enabled": false,

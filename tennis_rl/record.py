@@ -47,13 +47,15 @@ def _level_outcome_dir(root: Path, level: int, outcome: str, match_id: str) -> P
     return path
 
 
-def save_point(path: Path, observations: list[np.ndarray], actions: list[int], rewards: list[float], dones: list[bool], *, level: int, outcome: str, match_id: str, point_index: int, metadata: dict[str, object]) -> None:
+def save_point(path: Path, observations: list[np.ndarray], actions: list[int], rewards: list[float], dones: list[bool], *, level: int, outcome: str, match_id: str, point_index: int, metadata: dict[str, object], pulse_frames: list[int] | None = None) -> None:
+    """Persist one point. Unknown pulse labels are -1; known raw-frame counts are positive."""
     np.savez_compressed(
         path,
         observations=np.asarray(observations, dtype=np.uint8),
         actions=np.asarray(actions, dtype=np.int64),
         rewards=np.asarray(rewards, dtype=np.float32),
         dones=np.asarray(dones, dtype=np.bool_),
+        pulse_frames=np.asarray(pulse_frames if pulse_frames is not None else [-1] * len(actions), dtype=np.int16),
         level=np.asarray(level, dtype=np.int16),
         outcome=np.asarray(outcome),
         match_id=np.asarray(match_id),
@@ -112,6 +114,7 @@ def run(args: argparse.Namespace) -> int:
     observations: list[np.ndarray] = []
     rewards: list[float] = []
     dones: list[bool] = []
+    pulse_frames: list[int] = []
     point_index = 0
     prev_p_score = 0
     prev_o_score = 0
@@ -132,6 +135,8 @@ def run(args: argparse.Namespace) -> int:
         "action_names": list(ACTION_NAMES),
         "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "segmentation": "score-change-v2",
+        "scenario_tag": str(getattr(args, "scenario_tag", "") or ""),
+        "records_button_pulse_frames": True,
     }
 
     # ---- optional savestate harvesting for point-level scenario training ----
@@ -191,7 +196,7 @@ def run(args: argparse.Namespace) -> int:
                 print("RECORDING STARTED: Game 2 / receive-first", flush=True)
                 # This step carries game 1's end reward. Do not let it leak into
                 # the first recorded point; start clean after the changeover.
-                observations, actions, rewards, dones = [], [], [], []
+                observations, actions, rewards, dones, pulse_frames = [], [], [], [], []
                 prev_p_score, prev_o_score = p_score, o_score
                 prev_p_games, prev_o_games, prev_game_total = p_games, o_games, game_total
                 in_dead_time = True
@@ -218,6 +223,13 @@ def run(args: argparse.Namespace) -> int:
                 actions.append(human_action)
                 rewards.append(float(reward))
                 dones.append(bool(done))
+                shot_id = human_action % 3
+                if shot_id == 1:
+                    pulse_frames.append(int(info.get("a_pulse_frames", -1)))
+                elif shot_id == 2:
+                    pulse_frames.append(int(info.get("b_pulse_frames", -1)))
+                else:
+                    pulse_frames.append(-1)
 
             point_boundary = (
                 p_score != prev_p_score
@@ -229,8 +241,8 @@ def run(args: argparse.Namespace) -> int:
 
             if point_boundary:
                 # At a game/match boundary the reward can be game-level rather than a separate point reward.
-                point_won = float(sum(rewards)) > 0.0
-                point_outcome = "winning" if point_won else "losing"
+                point_reward = float(sum(rewards))
+                point_outcome = "winning" if point_reward > 1e-6 else ("losing" if point_reward < -1e-6 else "unknown")
                 # We do not yet know overall match outcome, so temporarily spool point data.
                 if not recording_started:
                     prev_p_score, prev_o_score = p_score, o_score
@@ -244,6 +256,7 @@ def run(args: argparse.Namespace) -> int:
                     "actions": np.asarray(actions, dtype=np.int64),
                     "rewards": np.asarray(rewards, dtype=np.float32),
                     "dones": np.asarray(dones, dtype=np.bool_),
+                    "pulse_frames": np.asarray(pulse_frames, dtype=np.int16),
                     "point_index": point_index,
                     "p_score": p_score,
                     "o_score": o_score,
@@ -251,7 +264,7 @@ def run(args: argparse.Namespace) -> int:
                 }
                 # Store in a lightweight in-memory list attached to function scope.
                 points.append(saved)
-                observations, actions, rewards, dones = [], [], [], []
+                observations, actions, rewards, dones, pulse_frames = [], [], [], [], []
                 in_dead_time = True
 
             if harvest_dir is not None and recording_started:
@@ -303,7 +316,7 @@ def run(args: argparse.Namespace) -> int:
                     point_name = match_dir / f"point_{p['point_index']:04d}.npz"
                     save_point(point_name, p["observations"], p["actions"], p["rewards"], p["dones"],
                                level=cfg.mesen.game_level, outcome=match_outcome, match_id=match_id,
-                               point_index=p["point_index"], metadata=metadata)
+                               point_index=p["point_index"], metadata=metadata, pulse_frames=p.get("pulse_frames"))
                 summary = {**metadata_base, "match_id": match_id, "serve_mode": serve_mode,
                            "recorded_game_number": record_game_number, "recorded_game_outcome": match_outcome,
                            "player_games_at_end": p_games, "opponent_games_at_end": o_games,
@@ -335,7 +348,7 @@ def run(args: argparse.Namespace) -> int:
                         point_name,
                         p["observations"], p["actions"], p["rewards"], p["dones"],
                         level=cfg.mesen.game_level, outcome=match_outcome, match_id=match_id,
-                        point_index=p["point_index"], metadata=metadata,
+                        point_index=p["point_index"], metadata=metadata, pulse_frames=p.get("pulse_frames"),
                     )
                 summary = {
                     **metadata_base,
@@ -376,6 +389,7 @@ def main() -> None:
                         help="A snapshot within this many steps of the point's end counts as 'late'.")
     parser.add_argument("--serve", choices=("serve-first", "receive-first"), default="serve-first",
                         help="Record with player serving first, or skip Game 1 and record Game 2 while receiving first.")
+    parser.add_argument("--scenario-tag", default="", help="Optional human-readable scenario label written into each point's metadata.")
     raise SystemExit(run(parser.parse_args()))
 
 

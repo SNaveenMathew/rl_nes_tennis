@@ -2,7 +2,7 @@
   "seed": 42,
   "device": "cuda",
   "mesen": {
-    "executable": "C:/Games/NES/Mesen.exe",
+    "executable": "C:/Games/MesenCE-2.2.1/Mesen.exe",
     "rom": "C:/Users/dbznf/Documents/NES/Tennis (JU).nes",
     "lua_script": "mesen/bridge.lua",
     "workers": 12,
@@ -103,8 +103,8 @@
     "seg_replay_steps_per_update": 4,
     "seg_replay_winning_bc_weight": 2.5,
     "seg_replay_losing_bc_weight": 0.4,
-    "seg_replay_outcome_coef": 0.30,
-    "seg_replay_lr": 3e-5,
+    "seg_replay_outcome_coef": 0.3,
+    "seg_replay_lr": 3e-05,
     "seg_replay_refresh_every": 50
   },
   "sil": {
@@ -126,14 +126,61 @@
     "mid_max_steps": 50,
     "start_max_steps": 25,
     "serve_stall_penalty": -1.0,
-    "rally_progress_reward": 0.20,
-    "late_progress_reward": 0.10,
+    "rally_progress_reward": 0.2,
+    "late_progress_reward": 0.1,
     "anchor_fraction": 0.15,
-    "probe_fraction": 0.10,
+    "probe_fraction": 0.1,
     "loss_state_fraction": 0.25,
     "promote_winrate": 0.45,
     "promote_min_episodes": 15,
-    "zpd_threshold": 0.20,
+    "zpd_threshold": 0.2,
     "zpd_late_bias": 0.65
+  },
+  "hierarchical": {
+    "enabled": true,
+    "skills": [
+      "serve_timing",
+      "serve_placement_power",
+      "serve_recovery",
+      "receive_position",
+      "return_stroke_timing",
+      "intercept_track",
+      "hold_cover",
+      "recover_reposition",
+      "approach_net",
+      "retreat_lob",
+      "stroke_selector",
+      "stroke_timing",
+      "transition_wait_reposition"
+    ],
+    "durations": [
+      1,
+      2,
+      4,
+      8
+    ],
+    "button_pulse_durations": [
+      1,
+      2,
+      4
+    ],
+    "hidden_dim": 128,
+    "rollout_steps": 256,
+    "learning_rate": 0.0001,
+    "gamma": 0.99,
+    "gae_lambda": 0.95,
+    "clip_range": 0.2,
+    "value_coef": 0.5,
+    "entropy_coef": 0.01,
+    "manager_supervision_coef": 0.15,
+    "demo_bc_coef": 0.5,
+    "perception_coef": 0.2,
+    "batch_size": 64,
+    "epochs": 3,
+    "checkpoint_every_updates": 10,
+    "max_step_checkpoints": 3,
+    "save_dir": "checkpoints_hierarchical",
+    "log_dir": "runs_hierarchical",
+    "use_verified_start_role_labels": true
   }
 }

@@ -140,10 +140,18 @@ class HierarchicalConfig:
     """Options for the learned manager + specialized expert policies."""
 
     enabled: bool = True
+    # Ordered leaf tasks. Root phase-gate and phase-specific sub-gates are
+    # derived from hierarchy_schema.PHASE_TASKS; inference routing is learned.
     skills: list[str] = field(default_factory=lambda: [
-        "serve", "receive", "baseline", "approach_net", "recover", "shot", "wait"
+        "serve_timing", "serve_placement_power", "serve_recovery",
+        "receive_position", "return_stroke_timing", "intercept_track",
+        "hold_cover", "recover_reposition", "approach_net", "retreat_lob",
+        "stroke_selector", "stroke_timing", "transition_wait_reposition",
     ])
     durations: list[int] = field(default_factory=lambda: [1, 2, 4, 8])
+    # Shot button pulse durations are measured in raw NES frames and must be
+    # <= mesen.frame_skip. The bridge preserves movement while pulsing A/B.
+    button_pulse_durations: list[int] = field(default_factory=lambda: [1, 2, 4])
     hidden_dim: int = 128
     rollout_steps: int = 256
     learning_rate: float = 1e-4

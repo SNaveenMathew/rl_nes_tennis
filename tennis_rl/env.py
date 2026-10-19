@@ -186,13 +186,21 @@ class ParallelTennis:
         role = cell_id.split("|", 1)[0]
         return role if role in {"serve", "return"} else None
 
-    def step(self, actions: np.ndarray) -> StepBatch:
+    def step(self, actions: np.ndarray, pulse_frames: np.ndarray | None = None) -> StepBatch:
         actions = np.asarray(actions, dtype=np.int64)
         if actions.shape != (self.n,):
             raise ValueError(f"Expected actions shape {(self.n,)}, got {actions.shape}")
+        pulse_values = None if pulse_frames is None else np.asarray(pulse_frames, dtype=np.int64)
+        if pulse_values is not None and pulse_values.shape != (self.n,):
+            raise ValueError(f"Expected pulse_frames shape {(self.n,)}, got {pulse_values.shape}")
+        if pulse_values is not None and np.any(pulse_values < 1):
+            raise ValueError("All pulse durations must be positive")
 
-        for worker, action in zip(self.workers, actions.tolist()):
-            worker.action(int(action))
+        for i, (worker, action) in enumerate(zip(self.workers, actions.tolist())):
+            if pulse_values is not None and (int(action) % 3 != 0) and getattr(worker, "supports_button_pulses", False):
+                worker.action(int(action), pulse_frames=int(pulse_values[i]))
+            else:
+                worker.action(int(action))
 
         observations: list[np.ndarray] = []
         rewards = np.zeros(self.n, dtype=np.float32)

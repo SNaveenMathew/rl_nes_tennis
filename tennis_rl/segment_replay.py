@@ -1,36 +1,18 @@
-"""Demonstration micro-segment replay for NES Tennis RL.
+"""Faithful micro-segment extraction/replay for NES Tennis demonstrations.
 
-Problem this solves
--------------------
-Training directly on whole tennis points (~60-600 steps) leads to credit-assignment
-failure and severe temporal dilution.  The single terminal reward at point-end is
-too sparse, causing agents to learn degeneracies like "never serve" or random flailing.
-
-Approach
---------
-This module decomposes recorded demonstrations into semantically grounded
-**micro-segments** (e.g. 16-32 steps):
-1. ``serve``    -- opening serve / toss execution (first steps of point).
-2. ``stroke``   -- hitting window with active A/B racket swing.
-3. ``approach`` -- directional movement towards intercept position.
-4. ``late``     -- endgame window deciding the point (last 30 steps).
-5. ``neutral``  -- in-play positioning.
-
-Reward & Return-To-Go Assignment
---------------------------------
-Returns-to-go are computed across the whole demonstration point and sliced to
-the local segment:
-- Winning points: positive RTG discounted from +1.0 throughout the rally.
-- Losing points: the terminal blunder receives negative RTG (-1.0), while
-  early/mid segments (valid serves and sustained rallies) receive a neutral/positive
-  continuation credit (+0.15), ensuring good human play before an unforced error
-  is NOT falsely penalized.
+Segments are temporal windows, not guessed tennis tasks. A segment receives a
+semantic label only when an explicit annotation covers its whole [start, end)
+range. Outcome/return values are computed from recorded environment rewards;
+match-level outcomes are never substituted for unknown point results, and lost
+points do not receive fabricated positive continuation credit.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import NamedTuple
+import json
 
 import numpy as np
 import torch
@@ -38,6 +20,7 @@ from torch import nn
 
 from .demonstrations import DemonstrationDataset, PointEpisode
 from .model import RecurrentActorCritic
+from .hierarchy_schema import TASK_TO_PHASE, phase_for_task
 
 
 # ---------------------------------------------------------------------------
@@ -84,17 +67,14 @@ class SegmentReplayConfig:
     # Rebuild the segment priority table every N outer-loop updates.
     refresh_every: int = 50
 
-    # Priority bonus applied to winning segments during sampling.
-    winning_priority_bonus: float = 2.0
-
-    # Minimum priority (all segments always have a chance).
+    # Kept only to read older config files. New sampling does not upweight
+    # whole points based on outcome or invent task labels from action patterns.
+    winning_priority_bonus: float = 1.0
     priority_eps: float = 0.05
-
-    # Segment taxonomy thresholds.
-    serve_lead_steps: int = 12       # first N steps of a point -> serve phase
-    late_lead_steps: int = 30        # last N steps of a point -> late / endgame
-    stroke_btn_thresh: float = 0.15  # >=15% of steps have A or B -> stroke
-    approach_move_thresh: float = 0.50 # >=50% steps have movement -> approach
+    serve_lead_steps: int = 12
+    late_lead_steps: int = 30
+    stroke_btn_thresh: float = 0.15
+    approach_move_thresh: float = 0.50
 
 
 # ---------------------------------------------------------------------------
@@ -102,109 +82,121 @@ class SegmentReplayConfig:
 # ---------------------------------------------------------------------------
 
 class _Segment(NamedTuple):
-    """One contiguous micro-segment cut from a recorded point."""
-    obs: np.ndarray        # [seg_len, 4, 84, 84] uint8
-    actions: np.ndarray    # [seg_len]             int64
-    rtg: np.ndarray        # [seg_len]             float32  (normalised, -1..1)
-    outcome: str           # "winning" | "losing"
-    seg_type: str          # "serve" | "stroke" | "approach" | "late" | "neutral"
+    """A contiguous slice with truthful reward metadata and optional explicit task label."""
+    obs: np.ndarray
+    actions: np.ndarray
+    rtg: np.ndarray
+    outcome: str                    # winning | losing | unknown
+    seg_type: str                   # exact annotation task or "unlabeled"
     priority: float
+    source_path: str = ""
+    start: int = 0
+    end: int = 0
+    phase: str | None = None
 
 
-def _classify_segment(actions: np.ndarray, start: int, point_len: int,
-                      cfg: SegmentReplayConfig) -> str:
-    """Heuristic segment type from action content and position in point."""
-    shots = actions % 3    # 0=none, 1=A, 2=B
-    moves = actions // 3   # 0=no_move, 1-8=directional
-
-    btn_frac = float((shots > 0).mean())
-    move_frac = float((moves > 0).mean())
-
-    if start < cfg.serve_lead_steps:
-        return "serve"
-    if start + cfg.seg_len >= point_len - cfg.late_lead_steps:
-        return "late"
-    if btn_frac >= cfg.stroke_btn_thresh:
-        return "stroke"
-    if move_frac >= cfg.approach_move_thresh:
-        return "approach"
-    return "neutral"
+def _classify_segment(
+    actions: np.ndarray,
+    start: int,
+    point_len: int,
+    cfg: SegmentReplayConfig,
+    annotations: list[dict] | None = None,
+    source_path: str | None = None,
+) -> str:
+    """Return an exact task label only if an annotation covers the whole slice."""
+    del actions, point_len  # action frequency and window location are not task labels
+    if annotations and source_path:
+        for row in annotations:
+            try:
+                same = Path(str(row["resolved_path"])).resolve() == Path(source_path).resolve()
+                if same and int(row["start"]) <= start and int(row["end"]) >= start + int(cfg.seg_len):
+                    label = str(row.get("leaf_task") or row.get("skill") or "")
+                    if label in TASK_TO_PHASE:
+                        return label
+            except (KeyError, TypeError, ValueError, OSError):
+                continue
+    return "unlabeled"
 
 
 def _compute_point_rtg(ep: PointEpisode, gamma: float) -> np.ndarray:
-    """Compute point-level return-to-go smoothly discounted from final outcome."""
-    n = ep.length
-    rewards = ep.rewards
-    outcome = ep.outcome
-    rtg = np.zeros(n, dtype=np.float32)
-
-    # If the episode has explicit environment terminal reward:
-    has_nonzero = np.any(np.abs(rewards) > 1e-4)
-    if has_nonzero:
-        g = 0.0
-        for i in range(n - 1, -1, -1):
-            g = float(rewards[i]) + gamma * g
-            rtg[i] = g
-        scale = float(np.abs(rtg).max())
-        if scale > 1e-6:
-            rtg = rtg / scale
-    else:
-        final_val = 1.0 if outcome == "winning" else -1.0
-        for i in range(n):
-            dist = n - 1 - i
-            rtg[i] = (gamma ** dist) * final_val
-
-    # For losing points: the blunder happened at the very end.
-    # Earlier rally frames were valid play; reward rally survival instead of penalizing:
-    if outcome == "losing":
-        late_boundary = max(0, n - 25)
-        for i in range(late_boundary):
-            rtg[i] = 0.15
-
+    """Discount only actual recorded rewards; unknown outcome stays zero-return."""
+    if not (0.0 <= gamma <= 1.0):
+        raise ValueError("gamma must be in [0,1]")
+    rewards = np.asarray(ep.rewards, dtype=np.float32)
+    rtg = np.zeros(ep.length, dtype=np.float32)
+    g = 0.0
+    for i in range(ep.length - 1, -1, -1):
+        g = float(rewards[i]) + gamma * g
+        rtg[i] = g
     return rtg
 
 
-def _extract_segments(ep: PointEpisode, cfg: SegmentReplayConfig) -> list[_Segment]:
-    """Cut a recorded point into overlapping micro-segments with ground-truth RTG."""
+def _read_task_annotations(root: Path) -> dict[str, list[dict]]:
+    """Parse explicit sidecars into per-file interval indexes, rejecting malformed rows."""
+    path = root / "task_annotations.jsonl"
+    result: dict[str, list[dict]] = {}
+    if not path.exists():
+        return result
+    for line_no, raw in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        try:
+            row = json.loads(raw)
+            source = (root / str(row["path"])).resolve()
+            start, end = int(row["start"]), int(row["end"])
+            label = str(row.get("leaf_task") or row.get("skill") or "")
+            if not source.is_file():
+                raise ValueError(f"missing source file {source}")
+            if start < 0 or end <= start:
+                raise ValueError("invalid half-open interval")
+            if not label:
+                raise ValueError("missing skill/leaf_task")
+            result.setdefault(str(source), []).append({
+                "resolved_path": str(source), "start": start, "end": end,
+                "leaf_task": label, "phase": row.get("phase") or phase_for_task(label),
+            })
+        except Exception as exc:
+            raise ValueError(f"Invalid task annotation line {line_no}: {exc}") from exc
+    return result
+
+
+def _extract_segments(
+    ep: PointEpisode,
+    cfg: SegmentReplayConfig,
+    annotations: list[dict] | None = None,
+) -> list[_Segment]:
+    """Cut overlapping windows while preserving raw return-to-go and exact labels."""
     n = ep.length
     if n < cfg.seg_len:
         return []
-
+    if cfg.seg_len <= 0:
+        raise ValueError("seg_len must be positive")
     point_rtg = _compute_point_rtg(ep, cfg.rtg_gamma)
     segments: list[_Segment] = []
-    stride = max(1, cfg.seg_len // 2)  # 50% overlap
-
+    stride = max(1, cfg.seg_len // 2)
+    resolved_path = str(Path(ep.path).resolve())
+    annotations = annotations or []
     for start in range(0, n - cfg.seg_len + 1, stride):
         end = start + cfg.seg_len
-        obs = ep.observations[start:end]
-        acts = ep.actions[start:end]
-        rtg = point_rtg[start:end]
-
-        seg_type = _classify_segment(acts, start, n, cfg)
-
-        # Priority calculation:
-        # 1. Base priority from outcome (winning gets bonus).
-        bonus = cfg.winning_priority_bonus if ep.outcome == "winning" else 1.0
-        # 2. Type-specific priority boost: ensure serve and stroke segments are prominent!
-        type_boost = 1.0
-        if seg_type == "serve":
-            type_boost = 1.8  # Always maintain heavy serve supervision
-        elif seg_type == "stroke":
-            type_boost = 1.5  # Maintain stroke timing supervision
-        elif seg_type == "late" and ep.outcome == "winning":
-            type_boost = 1.6  # Endgame winners
-
-        rtg_mag = float(np.abs(rtg).mean())
-        priority = (bonus * type_boost * (0.5 + 0.5 * rtg_mag)) + cfg.priority_eps
-
-        segments.append(_Segment(
-            obs=obs.astype(np.uint8, copy=False),
-            actions=acts.astype(np.int64, copy=False),
-            rtg=rtg.copy(),
-            outcome=ep.outcome,
-            seg_type=seg_type,
-            priority=priority,
-        ))
+        seg_type = "unlabeled"
+        phase = None
+        for row in annotations:
+            if row.get("resolved_path") == resolved_path and int(row["start"]) <= start and int(row["end"]) >= end:
+                label = str(row.get("leaf_task") or row.get("skill") or "")
+                if label in TASK_TO_PHASE:
+                    seg_type, phase = label, phase_for_task(label)
+                else:
+                    # Broad legacy labels may supply a phase, but not a leaf task.
+                    phase = phase_for_task(label)
+                break
+        obs = ep.observations[start:end].astype(np.uint8, copy=False)
+        acts = ep.actions[start:end].astype(np.int64, copy=False)
+        rtg = point_rtg[start:end].copy()
+        # Priority depends on the actual return signal only. Unknown / zero-return
+        # segments retain a nonzero uniform chance, not an outcome-based guess.
+        priority = float(np.abs(rtg).mean()) + float(cfg.priority_eps)
+        segments.append(_Segment(obs, acts, rtg, ep.outcome, seg_type, priority,
+                                 resolved_path, start, end, phase))
     return segments
 
 
@@ -241,10 +233,8 @@ class DemoSegmentReplayer:
         self._bc_total: float = 0.0
         self._outcome_total: float = 0.0
         self._n_updates: int = 0
-        self._type_counts: dict[str, int] = {
-            "serve": 0, "stroke": 0, "approach": 0, "late": 0, "neutral": 0
-        }
-
+        self._type_counts: dict[str, int] = {"unlabeled": 0}
+        self._task_annotations = _read_task_annotations(self.dataset.root)
         self._rebuild_segments()
 
     # ------------------------------------------------------------------
@@ -254,59 +244,53 @@ class DemoSegmentReplayer:
     def _rebuild_segments(self) -> None:
         """Extract all micro-segments from the current demonstration set."""
         segs: list[_Segment] = []
-        by_type: dict[str, list[_Segment]] = {
-            "serve": [], "stroke": [], "approach": [], "late": [], "neutral": []
-        }
+        by_type: dict[str, list[_Segment]] = {"unlabeled": []}
         for ep in self.dataset.episodes:
-            extracted = _extract_segments(ep, self.cfg)
+            rows = self._task_annotations.get(str(Path(ep.path).resolve()), [])
+            extracted = _extract_segments(ep, self.cfg, rows)
             segs.extend(extracted)
-            for s in extracted:
-                by_type.setdefault(s.seg_type, []).append(s)
-
+            for segment in extracted:
+                by_type.setdefault(segment.seg_type, []).append(segment)
         self._segments = segs
         self._by_type = by_type
+        self._type_counts = {key: len(value) for key, value in sorted(by_type.items())}
         if segs:
-            p = np.asarray([s.priority for s in segs], dtype=np.float64)
-            self._priorities = p / p.sum()
+            # Small epsilon ensures even zero-return/unknown segments remain sampleable.
+            priorities = np.asarray([max(float(s.priority), self.cfg.priority_eps) for s in segs], dtype=np.float64)
+            self._priorities = priorities / priorities.sum()
         else:
             self._priorities = np.array([], dtype=np.float64)
 
     def sample_batch(self, batch_size: int | None = None) -> list[_Segment]:
-        """Sample a batch of micro-segments with stratified type balancing."""
+        """Sample actual labelled tasks where available, otherwise neutral windows.
+
+        Stratification only balances labels that came from explicit annotation
+        sidecars. It never synthesizes a task from action-button frequency.
+        """
         if not self._segments:
             return []
-        B = batch_size if batch_size is not None else self.cfg.batch_size
-        B = min(B, len(self._segments))
-
-        # Stratified sampling: 25% serve, 35% stroke, 25% late, 15% other
+        size = int(batch_size if batch_size is not None else self.cfg.batch_size)
+        if size < 1:
+            raise ValueError("batch_size must be positive")
+        labelled = {key: value for key, value in self._by_type.items() if key != "unlabeled" and value}
         chosen: list[_Segment] = []
-        slots = {
-            "serve": max(1, int(round(B * 0.25))),
-            "stroke": max(1, int(round(B * 0.35))),
-            "late": max(1, int(round(B * 0.25))),
-        }
-        for stype, count in slots.items():
-            pool = self._by_type.get(stype, [])
-            if pool:
-                take = min(count, len(pool))
-                idx = self.rng.choice(len(pool), size=take, replace=len(pool) < take)
-                for i in np.asarray(idx).reshape(-1):
-                    chosen.append(pool[int(i)])
-
-        # Fill remainder from general priority distribution
-        rem = B - len(chosen)
-        if rem > 0 and len(self._segments) > 0:
-            idx = self.rng.choice(
-                len(self._segments),
-                size=rem,
-                replace=True,
-                p=self._priorities,
-            )
-            for i in np.asarray(idx).reshape(-1):
-                chosen.append(self._segments[int(i)])
-
+        if labelled:
+            # Allocate roughly equal slots across available leaf labels; remainder
+            # is sampled by return-weight priority to preserve coverage.
+            names = sorted(labelled)
+            per = max(1, size // len(names))
+            for name in names:
+                pool = labelled[name]
+                idx = self.rng.choice(len(pool), size=min(per, size), replace=len(pool) < per)
+                chosen.extend(pool[int(i)] for i in np.asarray(idx).reshape(-1))
+                if len(chosen) >= size:
+                    break
+        rem = size - len(chosen)
+        if rem > 0:
+            idx = self.rng.choice(len(self._segments), size=rem, replace=True, p=self._priorities)
+            chosen.extend(self._segments[int(i)] for i in np.asarray(idx).reshape(-1))
         self.rng.shuffle(chosen)
-        return chosen[:B]
+        return chosen[:size]
 
     # ------------------------------------------------------------------
     # Collation helpers
@@ -320,7 +304,7 @@ class DemoSegmentReplayer:
 
         obs = torch.zeros((T, B, 4, 84, 84), dtype=torch.uint8, device=dev)
         actions = torch.zeros((T, B), dtype=torch.long, device=dev)
-        outcome_target = torch.zeros((T, B), dtype=torch.float32, device=dev)
+        outcome_target = torch.full((T, B), -1.0, dtype=torch.float32, device=dev)
         bc_weight = torch.zeros((T, B), dtype=torch.float32, device=dev)
 
         cfg = self.cfg
@@ -331,12 +315,12 @@ class DemoSegmentReplayer:
 
             rtg_t = torch.from_numpy(seg.rtg[:t]).to(dev)
 
-            ot = 1.0 if seg.outcome == "winning" else 0.0
-            outcome_target[:t, j] = ot
+            if seg.outcome in {"winning", "losing"}:
+                outcome_target[:t, j] = 1.0 if seg.outcome == "winning" else 0.0
 
-            # BC weight = outcome_weight x RTG modulation, clamped to min.
-            ow = cfg.winning_bc_weight if seg.outcome == "winning" else cfg.losing_bc_weight
-            w = ow * (1.0 + cfg.rtg_coef * rtg_t).clamp_min(cfg.min_bc_weight)
+            # Human actions in a lost point are not automatically wrong. Weight
+            # by the real, bounded local return only; no outcome-derived relabeling.
+            w = (1.0 + cfg.rtg_coef * torch.tanh(rtg_t)).clamp(cfg.min_bc_weight, 1.0 + cfg.rtg_coef)
             bc_weight[:t, j] = w
 
         return obs, actions, outcome_target, bc_weight
@@ -374,10 +358,11 @@ class DemoSegmentReplayer:
         bc_denom = bc_weight.sum().clamp_min(1.0)
         bc_loss = -(logp * bc_weight).sum() / bc_denom
 
+        known_outcome = outcome_target >= 0
         outcome_bce = nn.functional.binary_cross_entropy_with_logits(
-            outcome_logits, outcome_target, reduction="none"
+            outcome_logits, outcome_target.clamp(0.0, 1.0), reduction="none"
         )
-        outcome_loss = outcome_bce.mean()
+        outcome_loss = (outcome_bce * known_outcome.float()).sum() / known_outcome.float().sum().clamp_min(1.0)
 
         self._bc_total += float(bc_loss.detach())
         self._outcome_total += float(outcome_loss.detach())

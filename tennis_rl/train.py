@@ -299,7 +299,8 @@ def main():
     parser.add_argument("--config", default="configs/scenario.json")
     parser.add_argument("--algo", default="hierarchical", choices=["hierarchical", "ppo", "dqfd"],
                         help="Train with the learned hierarchy (default), flat recurrent PPO baseline, or DQfD baseline")
-    parser.add_argument("--resume", default="")
+    parser.add_argument("--resume", default="", help="Resume model and optimizer state from a compatible trainer checkpoint")
+    parser.add_argument("--init-from", default="", help="Initialize weights only from a staged hierarchy checkpoint; optimizer starts fresh")
     parser.add_argument("--level", type=int, choices=range(1, 6), default=None)
     parser.add_argument("--workers", type=int, default=None,
                         help="Override number of Mesen parallel workers")
@@ -309,6 +310,8 @@ def main():
                         help="Perform only behavioral cloning pretraining on demonstration micro-segments, save checkpoint, and exit")
     parser.add_argument("--smoke-test", action="store_true")
     args = parser.parse_args()
+    if args.resume and args.init_from:
+        parser.error("Use either --resume (model+optimizer) or --init-from (weights only), not both")
 
     cfg = load_config(args.config)
     if args.level is not None:

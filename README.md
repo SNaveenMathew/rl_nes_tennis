@@ -1,6 +1,6 @@
 # Tennis RL
 
-A Windows-first reinforcement-learning framework for the 1984 NES Tennis ROM running in Mesen/MesenCE. The default training path is a **learned hierarchical PPO policy**: a global manager chooses a skill and a learned duration, and an independent specialist policy emits controller actions. Flat recurrent PPO and DQfD remain available as baselines.
+A Windows-first reinforcement-learning framework for the 1984 NES Tennis ROM running in Mesen/MesenCE. The default training path is a **learned hierarchical PPO policy**: a recurrent visual-belief encoder feeds a learned root phase gate, phase-conditional skill gates, and thirteen specialist leaf policies with conditional movement/button/pulse outputs. Option duration and termination are learned; flat recurrent PPO and DQfD remain available as baselines.
 
 > **Validation boundary:** this repository's sandbox smoke tests use synthetic observations and a mock worker. They validate code paths, optimizer updates, checkpoint round-trips, and supervised-loss behavior, but they do **not** establish that the policy can win real NES Tennis matches. Real-game validation requires the local Mesen executable, the ROM, and held-out emulator matches.
 
@@ -8,7 +8,8 @@ A Windows-first reinforcement-learning framework for the 1984 NES Tennis ROM run
 
 - **Mesen bridge and IPC** (`mesen/bridge.lua`, `tennis_rl/mesen_client.py`): frame capture, controller transport, score signals, and lock-step file-mailbox IPC.
 - **Vector environment** (`tennis_rl/env.py`): batched workers, frame stacks, point/scenario episodes, explicit termination vs. truncation, and role-aware serve-timeout semantics.
-- **Hierarchical policy** (`tennis_rl/hierarchical.py`, `tennis_rl/hierarchical_train.py`): learned manager, semi-Markov skill/duration decisions, separate skill-specific actor-critic heads, and task losses only from explicit annotation files.
+- **Hierarchical policy** (`tennis_rl/hierarchical.py`, `tennis_rl/hierarchical_train.py`): learned root phase gate → conditional branch gate → thirteen expert heads, semi-Markov skill/duration decisions, top-down inference, and task losses only from explicit annotation files.
+- **Staged training and independent evaluation** (`tennis_rl/staged_train.py`, `tennis_rl/assemble_hierarchy.py`, `tennis_rl/evaluate_scenarios.py`): foundation/perception/leaf/gate/joint stages, weight-compatible expert assembly, forced-expert evaluation and learned-manager evaluation from saved scenario states.
 - **Visual/action model** (`tennis_rl/model.py`): CNN visual encoder and a joint 27-way controller-action distribution, allowing movement and shot inputs to interact.
 - **Training data** (`tennis_rl/task_data.py`, `tennis_rl/record.py`, `tennis_rl/scenarios.py`): human demonstration recording, optional explicit task/state annotations, and scenario/state sampling. No inferred pixel centroid is treated as a ground-truth ball label.
 - **Baseline algorithms** (`tennis_rl/ppo.py`, `tennis_rl/dqfd.py`): flat recurrent PPO with terminal-observation-aware truncated GAE, and an optional DQfD path retained for comparison.
@@ -162,3 +163,7 @@ python -m tennis_rl.train --config configs/scenario.json --algo dqfd
 ```
 
 A hierarchy policy cannot be called a validated winning model until it is evaluated against the actual game AI over held-out emulator matches. Synthetic smoke-test metrics demonstrate only that the training pipeline executes and that supervised loss can decrease on a controlled mock task.
+
+## Staged hierarchical training
+
+Follow [`STAGED_TRAINING_GUIDE.md`](STAGED_TRAINING_GUIDE.md) for the training order, MesenCE 2.2.1 setup, demonstration recording, annotation, checkpoint assembly, independent scenario evaluation, and online fine-tuning. See [`IMPLEMENTATION_TEST_REPORT.md`](IMPLEMENTATION_TEST_REPORT.md) for the exact sandbox checks performed and the limits of what they validate. See [`HIERARCHY_BLUEPRINT.md`](HIERARCHY_BLUEPRINT.md) and [`hierarchy_spec.json`](hierarchy_spec.json) for the task hierarchy.

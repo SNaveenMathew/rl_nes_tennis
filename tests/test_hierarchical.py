@@ -54,7 +54,7 @@ def test_hierarchical_shapes_and_joint_action_space():
     assert out["expert_values"].shape == (3, 5)
     assert out["ball_xy"].shape == (3, 2)
     assert out["player_xy"].shape == (3, 2)
-    assert out["event_logits"].shape == (3, 4)
+    assert out["event_logits"].shape == (3, 11)
     action = model.act(obs)
     assert action.actions.shape == (3,)
     assert torch.all((action.actions >= 0) & (action.actions < 27))
@@ -123,8 +123,12 @@ def test_explicit_task_annotations_are_sampled_without_heuristic_labels(tmp_path
     assert len(dataset.state_annotations) == 1
     sampled = dataset.sample_training_batch(3, np.random.default_rng(2))
     assert sampled is not None
-    assert sampled["demo_obs"].shape == (3, 4, 84, 84)
-    assert torch.all(sampled["demo_skill"] == 0)
+    # Legacy "serve" is phase-only. It must never fabricate an exact
+    # serve-timing leaf action label.
+    assert sampled["demo_obs"].shape == (0, 4, 84, 84)
+    assert sampled["demo_skill"].numel() == 0
+    assert sampled["demo_manager_obs"].shape[0] == 3
+    assert torch.all(sampled["demo_manager_phase"] == 0)
     assert sampled["state_ball_xy"].shape == (3, 2)
 
 
@@ -215,3 +219,28 @@ def test_hierarchical_rollout_and_real_optimizer_iteration_with_mock_worker():
         assert all(np.isfinite(v) for v in metrics.values())
     finally:
         env.close()
+
+
+def test_deterministic_controller_traverses_root_then_branch_not_global_leaf_argmax():
+    """A singleton branch must not beat the root-selected phase just because it has fewer children."""
+    from tennis_rl.hierarchy_schema import DEFAULT_LEAF_TASKS
+
+    model = HierarchicalActorCritic(
+        observation_channels=4, action_count=27, channels=[8, 16, 16],
+        embedding_dim=32, hidden_dim=24, skills=list(DEFAULT_LEAF_TASKS),
+        durations=[1, 2, 4, 8], input_size=(84, 84),
+    )
+    with torch.no_grad():
+        model.phase_head.weight.zero_()
+        # Root prefers serve, but an argmax over flattened joint leaf priors
+        # would choose the singleton transition branch in this constructed case.
+        model.phase_head.bias.copy_(torch.tensor([0.5, 0.0, 0.0, 0.0]))
+        for gate in model.branch_gates.values():
+            gate[-1].weight.zero_()
+            gate[-1].bias.zero_()
+        out = model(torch.zeros((1, 4, 84, 84), dtype=torch.uint8))
+        assert int(out["manager_skill_logits"].argmax(-1)[0]) == model.skill_to_id["transition_wait_reposition"]
+    controller = HierarchicalController(model, deterministic=True)
+    controller.act(torch.zeros((1, 4, 84, 84), dtype=torch.uint8))
+    assert controller.last_skills is not None
+    assert int(controller.last_skills[0]) == model.skill_to_id["serve_timing"]

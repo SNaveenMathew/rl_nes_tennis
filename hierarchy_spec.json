@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "name": "nes_tennis_discriminative_hierarchy",
+  "status": "blueprint_not_yet_implemented",
+  "inference_routing": "learned_only",
+  "belief_encoder": {
+    "per_frame_encoder": "residual_cnn",
+    "temporal_encoder": "persistent_gru",
+    "initial_hidden_dim": 256,
+    "inputs": ["frame_history", "previous_action", "previous_option", "option_elapsed"] ,
+    "heads": {
+      "ball_xy": "masked_smooth_l1_or_gaussian_nll",
+      "player_xy": "masked_smooth_l1_or_gaussian_nll",
+      "ball_velocity": "masked_smooth_l1_or_gaussian_nll",
+      "time_to_contact": "regression_plus_ordinal_bins",
+      "events": ["serve_ready", "agent_serve", "cpu_serve", "ball_in_play", "ball_toward_agent", "ball_away_from_agent", "opponent_contact_window", "agent_contact_window", "high_floater_lob", "point_resolved", "uncertain"]
+    }
+  },
+  "root_gate": {
+    "outputs": ["serve", "receive", "rally", "transition_uncertain"],
+    "architecture": "2_layer_mlp_on_recurrent_belief_plus_calibrated_logits",
+    "losses": ["class_balanced_cross_entropy", "semi_markov_ppo", "optional_behavior_cloning"]
+  },
+  "branches": {
+    "serve": {
+      "manager_outputs": ["wait_for_window", "initiate_serve", "placement_power", "post_serve_recover"],
+      "leaf_models": ["serve_timing", "serve_placement_power", "serve_recovery"],
+      "losses": ["timing_bc", "placement_bc_when_verified", "serve_fault_event_loss", "legal_serve_event_loss", "ppo_point_return"]
+    },
+    "receive": {
+      "state_features": ["serve_lane", "serve_speed", "serve_height_profile", "arrival_xy", "time_to_contact", "uncertainty"],
+      "manager_outputs": ["adjust_position", "hold_position", "return_now", "reobserve"],
+      "leaf_models": ["receive_position", "return_stroke_timing"],
+      "losses": ["state_prediction", "return_action_bc", "return_success_event_loss", "ppo_point_return"]
+    },
+    "rally": {
+      "manager_outputs": ["intercept_track", "hold_cover", "recover_reposition", "approach_net", "retreat_for_lob", "stroke_opportunity", "reobserve"],
+      "leaf_models": ["intercept_track", "hold_cover", "recover_reposition", "approach_net", "retreat_for_lob", "stroke_selector", "stroke_timing"],
+      "stroke_outputs": ["none", "A_normal", "B_lob"],
+      "losses": ["task_bc", "validated_event_loss", "local_critic_ppo", "ppo_point_return"]
+    },
+    "transition_uncertain": {
+      "manager_outputs": ["neutral_wait", "maintain_coverage", "short_reobserve", "prepare_next_point"],
+      "leaf_models": ["transition_wait_reposition"],
+      "losses": ["task_bc", "semi_markov_ppo", "point_return"]
+    }
+  },
+  "primitive_action": {
+    "movement_choices": ["NO_MOVE", "LEFT", "RIGHT", "UP", "DOWN", "LEFT_UP", "RIGHT_UP", "LEFT_DOWN", "RIGHT_DOWN"],
+    "button_choices": ["NONE", "A", "B"],
+    "factorization": "P(movement|belief,task) * P(button|belief,task,movement)",
+    "timing": {
+      "movement_durations_decisions": [1, 2, 4, 8],
+      "button_press_duration": "separate_pulse_or_hold_head",
+      "termination": "learned_continue_or_return_to_manager"
+    }
+  },
+  "reward_design": {
+    "global": ["point_win_loss", "game_win_loss_if_validated"],
+    "local_verified_events": ["legal_serve", "serve_fault", "successful_return", "contact_success", "rally_continued", "point_resolved"],
+    "potential_shaping": "only_validated_learned_future_value_difference_and_ablation_required",
+    "prohibited": ["reward_for_fixed_court_coordinate", "label_all_actions_in_winning_point_as_good", "infer_ball_coordinates_from_pixel_motion_centroid", "rule_based_inference_router"]
+  },
+  "scenario_axes": {
+    "point_start_cells": 36,
+    "score_role_strata": 20,
+    "temporal_modes": ["serve_setup", "serve_initiation", "serve_in_flight", "receiving", "early_rally", "mid_rally", "late_rally", "cpu_turn", "agent_contact_window", "post_agent_stroke", "high_floater_lob", "point_transition", "uncertain"],
+    "ball_lanes": ["left", "center", "right"],
+    "depth_buckets": ["short", "middle", "deep"],
+    "speed_buckets": ["slow", "medium", "fast_quantiles"],
+    "time_to_contact": ["urgent", "soon", "not_imminent"],
+    "agent_depth": ["baseline", "mid_court", "net"],
+    "opponent_depth": ["baseline", "mid_court", "net"],
+    "critical_contrasts": ["inbound_vs_outbound", "player_turn_vs_cpu_turn", "fast_vs_slow_serve", "ordinary_ball_vs_lob", "move_vs_wait", "approach_vs_hold", "retreat_vs_continue_forward", "early_vs_in_window_vs_late_contact", "normal_vs_lob_vs_no_stroke"]
+  },
+  "training_order": [
+    "validate_emulator_telemetry_and_button_edges",
+    "annotate_and_match_split_demos",
+    "pretrain_belief_encoder",
+    "warm_start_leaf_specialists_with_task_balanced_behavior_cloning",
+    "train_leaf_online_rl_on_matching_scenario_resets",
+    "pretrain_gates_then_schedule_model_selected_routes",
+    "train_managers_with_semi_markov_ppo",
+    "manager_only_finetuning_with_leaf_weights_frozen",
+    "controlled_joint_finetuning",
+    "matched_budget_ablations_and_holdout_evaluation"
+  ],
+  "promotion_rule": "split_or_promote_a_leaf_only_if_it_has_a_distinct_measurable_objective,_sufficient_positive_and_negative_examples_from_multiple_matches,_and_higher_heldout_task_and_point_performance_at_matched_environment_steps"
+}

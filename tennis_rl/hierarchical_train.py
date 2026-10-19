@@ -19,21 +19,19 @@ from .env import ParallelTennis
 from .task_data import TaskAnnotationDataset
 
 
-def _verified_manager_target(assignment: Any, model: HierarchicalActorCritic, enabled: bool) -> int:
-    """Return a manager label only where task metadata is explicit and reliable.
-
-    The labels are supervision only. The inference controller never inspects role,
-    phase, score or RAM to route the model.
-    """
+def _verified_manager_targets(assignment: Any, model: HierarchicalActorCritic, enabled: bool) -> tuple[int, int]:
+    """Return (exact leaf target, broad phase target) from trusted metadata only."""
     if not enabled or assignment is None:
-        return -1
+        return -1, -1
     if getattr(assignment, "kind", None) not in ("scenario", "probe"):
-        return -1
+        return -1, -1
     if getattr(assignment, "phase", None) != "start":
-        return -1
+        return -1, -1
     role = str(getattr(assignment, "cell_id", "")).split("|", 1)[0]
-    label = {"serve": "serve", "return": "receive"}.get(role)
-    return model.skill_to_id.get(label, -1) if label is not None else -1
+    phase = {"serve": "serve", "return": "receive"}.get(role)
+    if phase is None:
+        return -1, -1
+    return -1, model.phase_to_id.get(phase, -1)
 
 
 def collect_rollout(
@@ -42,14 +40,28 @@ def collect_rollout(
     observations: np.ndarray,
     cfg,
     device: torch.device,
+    belief_hidden: torch.Tensor | None = None,
 ) -> tuple[dict[str, torch.Tensor], np.ndarray, dict[str, float]]:
-    """Collect low-level expert transitions and semi-Markov manager decisions."""
+    """Collect option-level semi-Markov and leaf-level PPO data.
+
+    The GRU state is persistent across observation boundaries and is reset only
+    when the environment truly ends/restarts. Returned ``data['belief_hidden_out']``
+    is the state to pass to the next rollout; it is intentionally removed before
+    trainer.update() because it is collector state, not a training target.
+    """
     hc = cfg.hierarchical
     t_steps, n_envs = int(hc.rollout_steps), int(env.n)
-    obs_buf = np.zeros((t_steps, n_envs, *observations.shape[1:]), dtype=np.uint8)
+    if belief_hidden is None:
+        belief_hidden = model.initial_belief(n_envs, device)
+    else:
+        belief_hidden = belief_hidden.to(device)
+    if max(model.button_pulse_durations) > int(cfg.mesen.frame_skip):
+        raise ValueError(
+            f"hierarchical.button_pulse_durations={model.button_pulse_durations} must be <= "
+            f"mesen.frame_skip={cfg.mesen.frame_skip}; pulses cannot exceed one observed action interval"
+        )
+
     skills_buf = np.zeros((t_steps, n_envs), dtype=np.int64)
-    actions_buf = np.zeros((t_steps, n_envs), dtype=np.int64)
-    expert_logp_buf = np.zeros((t_steps, n_envs), dtype=np.float32)
     expert_values_buf = np.zeros((t_steps, n_envs), dtype=np.float32)
     rewards_buf = np.zeros((t_steps, n_envs), dtype=np.float32)
     dones_buf = np.zeros((t_steps, n_envs), dtype=np.bool_)
@@ -57,37 +69,27 @@ def collect_rollout(
     next_values_buf = np.zeros((t_steps, n_envs), dtype=np.float32)
 
     manager_records: list[list[dict[str, Any]]] = [[] for _ in range(n_envs)]
-    # Each context corresponds to an active temporally extended skill option.
     contexts: list[dict[str, Any] | None] = [None] * n_envs
     active_skills = np.full(n_envs, -1, dtype=np.int64)
     remaining = np.zeros(n_envs, dtype=np.int64)
-
-    manager_target_buf: list[int] = []
-    manager_obs_buf: list[np.ndarray] = []
-    manager_skill_buf: list[int] = []
-    manager_duration_buf: list[int] = []
-    manager_logp_buf: list[float] = []
-    manager_value_buf: list[float] = []
-
     expert_obs_buf: list[np.ndarray] = []
     expert_skill_list: list[int] = []
     expert_action_list: list[int] = []
+    expert_pulse_list: list[int] = []
     expert_logp_list: list[float] = []
     expert_value_list: list[float] = []
-    expert_reward_list: list[float] = []
-    expert_done_list: list[bool] = []
-    expert_trunc_list: list[bool] = []
-    expert_next_value_list: list[float] = []
     expert_step_worker: list[int] = []
     expert_step_index: list[int] = []
-
+    expert_hidden_list: list[torch.Tensor] = []
     stats = Counter()
     model.eval()
+
     for t in range(t_steps):
-        obs_buf[t] = observations
         obs_t = torch.from_numpy(observations).to(device, non_blocking=True)
+        hidden_before = belief_hidden.detach().clone()
         with torch.no_grad():
-            output = model(obs_t)
+            output = model(obs_t, belief_hidden)
+            hidden_after = output["belief_hidden_out"].detach()
             skill_dist = Categorical(logits=output["manager_skill_logits"])
             duration_dist = Categorical(logits=output["manager_duration_logits"])
             sampled_skills = skill_dist.sample()
@@ -101,23 +103,19 @@ def collect_rollout(
                     skill_id = int(sampled_skills[i].item())
                     duration_id = int(sampled_durations[i].item())
                     manager_logp = float((sampled_skill_logp[i] + sampled_duration_logp[i]).item())
-                    target_skill = _verified_manager_target(
+                    target_leaf, target_phase = _verified_manager_targets(
                         env.assignments[i], model, bool(hc.use_verified_start_role_labels)
                     )
                     contexts[i] = {
                         "obs": observations[i].copy(), "skill": skill_id,
                         "duration": duration_id, "logp": manager_logp,
                         "value": float(output["manager_values"][i].item()),
-                        "return": 0.0, "elapsed": 0, "target": target_skill,
+                        "hidden": hidden_before[:, i, :].detach().cpu(),
+                        "return": 0.0, "elapsed": 0,
+                        "target": target_leaf, "target_phase": target_phase,
                     }
                     active_skills[i] = skill_id
                     remaining[i] = int(model.durations[duration_id])
-                    manager_obs_buf.append(observations[i].copy())
-                    manager_skill_buf.append(skill_id)
-                    manager_duration_buf.append(duration_id)
-                    manager_logp_buf.append(manager_logp)
-                    manager_value_buf.append(float(output["manager_values"][i].item()))
-                    manager_target_buf.append(target_skill)
 
             selected_skills = torch.as_tensor(active_skills, dtype=torch.long, device=device)
             rows = torch.arange(n_envs, device=device)
@@ -125,65 +123,80 @@ def collect_rollout(
             expert_dist = Categorical(logits=selected_logits)
             action_tensor = expert_dist.sample()
             expert_logp = expert_dist.log_prob(action_tensor)
+            selected_pulse_logits = output["expert_pulse_logits"][rows, selected_skills]
+            pulse_dist = Categorical(logits=selected_pulse_logits)
+            pulse_ids = pulse_dist.sample()
+            pulse_logp = pulse_dist.log_prob(pulse_ids)
+            has_shot = (action_tensor.remainder(3) != 0).float()
+            combined_expert_logp = expert_logp + pulse_logp * has_shot
             expert_value = output["expert_values"][rows, selected_skills]
 
         action_np = action_tensor.cpu().numpy().astype(np.int64, copy=False)
-        batch = env.step(action_np)
+        pulse_id_np = pulse_ids.cpu().numpy().astype(np.int64, copy=False)
+        pulse_frames_np = np.asarray(
+            [model.button_pulse_durations[int(index)] for index in pulse_id_np], dtype=np.int64
+        )
+        batch = env.step(action_np, pulse_frames=pulse_frames_np)
         next_obs = batch.observations
         next_obs_t = torch.from_numpy(next_obs).to(device, non_blocking=True)
+        # Evaluate terminal/truncated next state using the hidden state after
+        # the current observation. This call does not advance the persistent
+        # belief; the next collection iteration will process the same next state.
         with torch.no_grad():
-            next_output = model(next_obs_t)
+            next_output = model(next_obs_t, hidden_after)
         done_arr = np.asarray(batch.dones, dtype=np.bool_)
         trunc_arr = np.asarray(batch.truncateds if batch.truncateds is not None else [False] * n_envs, dtype=np.bool_)
-        term_arr = np.asarray([bool(x.get("terminated", bool(done_arr[i] and not trunc_arr[i])))
-                               for i, x in enumerate(batch.infos)], dtype=np.bool_)
+        term_arr = np.asarray([
+            bool(info.get("terminated", bool(done_arr[i] and not trunc_arr[i])))
+            for i, info in enumerate(batch.infos)
+        ], dtype=np.bool_)
 
         for i in range(n_envs):
-            a = int(action_np[i])
-            s_id = int(active_skills[i])
-            v = float(expert_value[i].item())
-            lp = float(expert_logp[i].item())
-            r = float(batch.rewards[i])
-            nv = float(next_output["expert_values"][i, s_id].item())
-
+            action = int(action_np[i])
+            skill_id = int(active_skills[i])
+            value = float(expert_value[i].item())
+            logp = float(combined_expert_logp[i].item())
+            reward = float(batch.rewards[i])
+            next_value = float(next_output["expert_values"][i, skill_id].item())
             expert_obs_buf.append(observations[i].copy())
-            expert_skill_list.append(s_id)
-            expert_action_list.append(a)
-            expert_logp_list.append(lp)
-            expert_value_list.append(v)
-            expert_reward_list.append(r)
-            expert_done_list.append(bool(term_arr[i]))
-            expert_trunc_list.append(bool(trunc_arr[i]))
-            expert_next_value_list.append(nv)
+            expert_skill_list.append(skill_id)
+            expert_action_list.append(action)
+            expert_pulse_list.append(int(pulse_id_np[i]))
+            expert_logp_list.append(logp)
+            expert_value_list.append(value)
+            expert_hidden_list.append(hidden_before[:, i, :].detach().cpu())
             expert_step_worker.append(i)
             expert_step_index.append(t)
 
-            skills_buf[t, i] = s_id
-            actions_buf[t, i] = a
-            expert_logp_buf[t, i] = lp
-            expert_values_buf[t, i] = v
-            rewards_buf[t, i] = r
+            skills_buf[t, i] = skill_id
+            expert_values_buf[t, i] = value
+            rewards_buf[t, i] = reward
             dones_buf[t, i] = bool(done_arr[i])
             truncs_buf[t, i] = bool(trunc_arr[i])
-            next_values_buf[t, i] = nv
+            next_values_buf[t, i] = next_value
 
             context = contexts[i]
             if context is not None:
-                context["return"] += (float(hc.gamma) ** int(context["elapsed"])) * r
+                context["return"] += (float(hc.gamma) ** int(context["elapsed"])) * reward
                 context["elapsed"] += 1
             remaining[i] -= 1
 
-            if batch.infos[i].get("service_fault"):
+            info = batch.infos[i]
+            if info.get("service_fault"):
                 stats["service_faults"] += 1
-            if batch.infos[i].get("rally_survival"):
+            if info.get("rally_survival"):
                 stats["rally_survivals"] += 1
+            if info.get("bridge_restart"):
+                stats["bridge_restarts"] += 1
             if done_arr[i]:
                 stats["episodes"] += 1
-                result = int(batch.infos[i].get("point_result", 0))
+                result = int(info.get("point_result", 0))
                 if result > 0:
                     stats["point_wins"] += 1
                 elif result < 0:
                     stats["point_losses"] += 1
+                else:
+                    stats["unknown_point_results"] += 1
 
             option_finished = remaining[i] <= 0 or bool(done_arr[i])
             if option_finished and context is not None:
@@ -201,17 +214,20 @@ def collect_rollout(
                 active_skills[i] = -1
                 remaining[i] = 0
 
+        # Recurrent memory advances exactly once per current observation. At a
+        # completed episode, clear memory before the reset observation next time.
+        belief_hidden = hidden_after.clone()
+        for i in np.flatnonzero(done_arr):
+            belief_hidden[:, int(i), :] = 0.0
         observations = next_obs.copy()
         for i in np.flatnonzero(done_arr):
-            # ParallelTennis resets workers after preserving terminal observations
-            # in batch.observations; current_observation is now the reset state.
             observations[int(i)] = env.current_observation(int(i))
 
-    # End-of-rollout boundaries close partial options with an explicit value
-    # bootstrap, without pretending that the tennis point terminated.
+    # Rollout boundary is a truncation: bootstrap the next state but keep the
+    # persistent hidden state from the last state actually acted upon.
     final_obs_t = torch.from_numpy(observations).to(device, non_blocking=True)
     with torch.no_grad():
-        final_output = model(final_obs_t)
+        final_output = model(final_obs_t, belief_hidden)
     for i, context in enumerate(contexts):
         if context is None:
             continue
@@ -222,19 +238,15 @@ def collect_rollout(
             "truncated": True,
             "duration_steps": int(context["elapsed"]),
         })
-        contexts[i] = None
-        active_skills[i] = -1
-        remaining[i] = 0
 
-    # Compute semi-Markov GAE independently for each worker's ordered options.
+    # Semi-Markov GAE over each worker's ordered manager decisions.
     manager_advantages: list[float] = []
     manager_returns: list[float] = []
     manager_ordered_records: list[dict[str, Any]] = []
-    gamma = float(hc.gamma)
-    lam = float(hc.gae_lambda)
+    gamma, lam = float(hc.gamma), float(hc.gae_lambda)
     for records in manager_records:
         adv = 0.0
-        advantages_by_record = [0.0] * len(records)
+        adv_by_record = [0.0] * len(records)
         returns_by_record = [0.0] * len(records)
         for j in reversed(range(len(records))):
             rec = records[j]
@@ -244,34 +256,29 @@ def collect_rollout(
             stop_trace = terminal or bool(rec["truncated"])
             delta = float(rec["return"]) + discount * float(rec["next_value"]) * (0.0 if terminal else 1.0) - float(rec["value"])
             adv = delta + ((gamma * lam) ** duration) * (0.0 if stop_trace else adv)
-            advantages_by_record[j] = adv
+            adv_by_record[j] = adv
             returns_by_record[j] = adv + float(rec["value"])
-        for rec, advantage, target_return in zip(records, advantages_by_record, returns_by_record):
+        for rec, advantage, target_return in zip(records, adv_by_record, returns_by_record):
             manager_ordered_records.append(rec)
             manager_advantages.append(float(advantage))
             manager_returns.append(float(target_return))
 
-    # Expert GAE uses the active expert's own value estimate. A trace crosses a
-    # step only when the same skill remains active; changing skill bootstraps that
-    # expert's value but never leaks another expert's advantage into its trace.
+    # Per-expert GAE does not leak across expert switches. Truncated transitions
+    # bootstrap from the final observed state; terminated transitions do not.
+    t_steps = int(hc.rollout_steps)
     expert_adv_by_step = np.zeros((t_steps, n_envs), dtype=np.float32)
     expert_ret_by_step = np.zeros((t_steps, n_envs), dtype=np.float32)
     adv_next = np.zeros(n_envs, dtype=np.float32)
     for t in reversed(range(t_steps)):
         for i in range(n_envs):
             terminal = bool(dones_buf[t, i] and not truncs_buf[t, i])
-            delta = (rewards_buf[t, i] + gamma * next_values_buf[t, i] * (0.0 if terminal else 1.0)
-                     - expert_values_buf[t, i])
-            same_skill_next = (
-                t + 1 < t_steps and not dones_buf[t, i]
-                and skills_buf[t + 1, i] == skills_buf[t, i]
-            )
+            delta = rewards_buf[t, i] + gamma * next_values_buf[t, i] * (0.0 if terminal else 1.0) - expert_values_buf[t, i]
+            same_skill_next = (t + 1 < t_steps and not dones_buf[t, i] and skills_buf[t + 1, i] == skills_buf[t, i])
             trace = gamma * lam * float(adv_next[i]) if same_skill_next else 0.0
             expert_adv_by_step[t, i] = delta + trace
             expert_ret_by_step[t, i] = expert_adv_by_step[t, i] + expert_values_buf[t, i]
         adv_next = expert_adv_by_step[t].copy()
 
-    # Keep expert entries in the exact temporal ordering in which they were collected.
     flat_expert_adv = [float(expert_adv_by_step[t, i]) for t, i in zip(expert_step_index, expert_step_worker)]
     flat_expert_returns = [float(expert_ret_by_step[t, i]) for t, i in zip(expert_step_index, expert_step_worker)]
 
@@ -280,11 +287,13 @@ def collect_rollout(
             return torch.from_numpy(np.stack(rows).astype(np.uint8, copy=False))
         return torch.empty((0, *observations.shape[1:]), dtype=torch.uint8)
 
-    manager_obs_tensor = obs_tensor([r["obs"] for r in manager_ordered_records])
-    # Manager records sorted worker-by-worker above; all associated arrays use the
-    # same manager_ordered_records order.
-    data = {
-        "manager_obs": manager_obs_tensor,
+    def hidden_tensor(rows: list[torch.Tensor]) -> torch.Tensor:
+        if rows:
+            return torch.stack(rows, dim=0).float()
+        return torch.empty((0, model.gru_layers, model.belief_hidden_dim), dtype=torch.float32)
+
+    data: dict[str, torch.Tensor] = {
+        "manager_obs": obs_tensor([r["obs"] for r in manager_ordered_records]),
         "manager_skill": torch.tensor([r["skill"] for r in manager_ordered_records], dtype=torch.long),
         "manager_duration": torch.tensor([r["duration"] for r in manager_ordered_records], dtype=torch.long),
         "manager_old_logp": torch.tensor([r["logp"] for r in manager_ordered_records], dtype=torch.float32),
@@ -292,18 +301,22 @@ def collect_rollout(
         "manager_advantages": torch.tensor(manager_advantages, dtype=torch.float32),
         "manager_returns": torch.tensor(manager_returns, dtype=torch.float32),
         "manager_target_skill": torch.tensor([r["target"] for r in manager_ordered_records], dtype=torch.long),
+        "manager_target_phase": torch.tensor([r["target_phase"] for r in manager_ordered_records], dtype=torch.long),
+        "manager_hidden": hidden_tensor([r["hidden"] for r in manager_ordered_records]),
         "expert_obs": obs_tensor(expert_obs_buf),
         "expert_skill": torch.tensor(expert_skill_list, dtype=torch.long),
         "expert_action": torch.tensor(expert_action_list, dtype=torch.long),
+        "expert_pulse_duration_ids": torch.tensor(expert_pulse_list, dtype=torch.long),
         "expert_old_logp": torch.tensor(expert_logp_list, dtype=torch.float32),
         "expert_advantages": torch.tensor(flat_expert_adv, dtype=torch.float32),
         "expert_returns": torch.tensor(flat_expert_returns, dtype=torch.float32),
+        "expert_hidden": hidden_tensor(expert_hidden_list),
+        "belief_hidden_out": belief_hidden.detach().cpu(),
     }
     stats_out = {k: float(v) for k, v in stats.items()}
     stats_out["manager_decisions"] = float(len(manager_ordered_records))
     stats_out["expert_steps"] = float(len(expert_obs_buf))
     return data, observations, stats_out
-
 
 def _scenario_sampler(cfg, seed: int):
     sc = cfg.scenario
@@ -369,7 +382,18 @@ def run_hierarchical_training(
         skills=hc.skills,
         durations=hc.durations,
         input_size=(cfg.mesen.observation_height, cfg.mesen.observation_width),
+        button_pulse_durations=hc.button_pulse_durations,
+        gru_hidden_dim=cfg.network.gru_hidden,
+        gru_layers=cfg.network.gru_layers,
     ).to(device)
+    if getattr(args, "init_from", ""):
+        payload = torch.load(args.init_from, map_location=device, weights_only=False)
+        if not isinstance(payload, dict) or payload.get("format") != "tennis_rl_hierarchical_v2":
+            raise ValueError("--init-from must be a tennis_rl_hierarchical_v2 checkpoint")
+        if tuple(payload.get("skills", ())) != model.skills:
+            raise ValueError("--init-from checkpoint task order does not match configs/scenario.json")
+        model.load_state_dict(payload["model"], strict=True)
+        print(f"Initialized weights only from {args.init_from}; starting a fresh PPO optimizer")
     trainer = HierarchicalPPOTrainer(model, hc, device)
     if args.resume:
         print(f"Resumed hierarchy checkpoint: {trainer.load(args.resume)}")
@@ -381,7 +405,10 @@ def run_hierarchical_training(
             f"WARNING: scenario.enabled=true but {Path(sc.state_dir) / 'manifest.jsonl'} was not found; "
             "running on full matches until scenarios are harvested."
         )
-    task_dataset = TaskAnnotationDataset(cfg.ppo.demo_root, model.skills, model.durations)
+    task_dataset = TaskAnnotationDataset(
+        cfg.ppo.demo_root, model.skills, model.durations,
+        button_pulse_durations=model.button_pulse_durations,
+    )
     if len(task_dataset) or task_dataset.state_annotations:
         print(
             f"Explicit annotations: task_segments={len(task_dataset)} "
@@ -438,12 +465,14 @@ def run_hierarchical_training(
         f"workers={env.n}, rollout_steps={hc.rollout_steps}, device={device}"
     )
     observations = env.reset()
+    belief_hidden = model.initial_belief(env.n, device)
     steps_done = int(trainer.env_steps)
     update = int(trainer.update_index)
     start_time = time.perf_counter()
     try:
         while steps_done < int(cfg.ppo.total_steps):
-            data, observations, stats = collect_rollout(model, env, observations, cfg, device)
+            data, observations, stats = collect_rollout(model, env, observations, cfg, device, belief_hidden)
+            belief_hidden = data.pop("belief_hidden_out").to(device)
             annotation_batch = task_dataset.sample_training_batch(int(hc.batch_size), annotation_rng)
             if annotation_batch is not None:
                 data.update(annotation_batch)
