@@ -6,16 +6,30 @@ lupa = pytest.importorskip("lupa")
 from pathlib import Path as _P
 HERE = _P(__file__).resolve().parent
 ROOT = HERE.parent
+sys.path.insert(0, str(HERE))
+from lua_test_support import install_lua_test_environment
+
 def run(bridge_path, script):
     ipc = Path(tempfile.mkdtemp())
-    os.environ.update({"MESEN_RL_IPC_DIR": str(ipc), "MESEN_RL_W": "8", "MESEN_RL_H": "8",
+    env = {"MESEN_RL_IPC_DIR": str(ipc), "MESEN_RL_W": "8", "MESEN_RL_H": "8",
         "MESEN_RL_FRAME_SKIP": "4", "MESEN_RL_AUTO_BOOT": "0", "MESEN_RL_LOCKSTEP": "1",
         "MESEN_RL_LOCKSTEP_TIMEOUT": "20", "MESEN_RL_STRICT_LOCKSTEP": "1",
-        "MESEN_RL_STRICT_WAIT_S": "0.70"})
+        "MESEN_RL_STRICT_WAIT_S": "0.70"}
+    os.environ.update(env)
+    # Strict lockstep waits inside a Lua callback for the host thread to publish
+    # the next command. Explicitly inject the environment because embedded Lua
+    # on Windows may not see Python's runtime os.environ updates.
     lua = lupa.LuaRuntime()
+    install_lua_test_environment(lua, env)
     lua.execute((HERE / "mock_emu.lua").read_text())
     lua.execute(Path(bridge_path).read_text())
     mock = lua.globals().mock
+    api_info = (ipc / "api_info.txt").read_text(encoding="utf-8")
+    if bridge_path == str(ROOT / "mesen" / "bridge.lua"):
+        assert "strict_lockstep=true" in api_info, (
+            "test configuration did not reach Lua; refusing to run replay determinism "
+            f"checks in soft lockstep. api_info.txt:\n{api_info}"
+        )
     state = {"done": False, "log": []}
 
     def send(line):
@@ -26,8 +40,6 @@ def run(bridge_path, script):
             if (ipc / name).exists(): return True
             time.sleep(0.001)
         return False
-    def frame_of_obs():  # emulator frame at the moment an observation was published
-        return int(mock.frame)
     def step(tok):
         # Tests deliberately reuse the "idle" token below. Remove the prior ready
         # marker before issuing a new command so an old marker cannot satisfy the
@@ -36,7 +48,7 @@ def run(bridge_path, script):
         ready.unlink(missing_ok=True)
         send(f"A {tok} 0")
         assert wait(f"observation_ready_{tok}.ready"), "no observation"
-        return int(open(ipc / f"observation_ready_{tok}.ready", "rb").read().split()[0]) if False else None
+        return None
     ctx = dict(send=send, wait=wait, step=step, ipc=ipc, state=state, mock=mock)
 
     # Run script-side assertions in a wrapper that always signals completion.
@@ -63,6 +75,8 @@ def run(bridge_path, script):
     err = ""
     p = ipc / "error.txt"
     if p.exists(): err = p.read_text()
+    # Query Lua only from the emulation-driving thread, never the host helper.
+    state["active_callbacks"] = int(mock.active_callbacks())
     out = (state, int(mock.frame), int(mock.loaded or 0), err, ipc)
     return out
 
@@ -136,9 +150,9 @@ def script_det(c):
     for i in range(4):
         __import__("time").sleep(0.15); c["step"](f"s{i}"); cur = snap(f"p{i+1}"); gaps.append(cur - prev); prev = cur
     for _ in range(3): c["step"]("idle")
-    st["det"] = dict(base=f0, loads=loads, zero=zero, gaps=gaps, armed_when_idle=int(c["mock"].active_callbacks()))
+    st["det"] = dict(base=f0, loads=loads, zero=zero, gaps=gaps)
 st3, _, _, err3, ipc3 = run(str(ROOT / "mesen" / "bridge.lua"), script_det)
-d = st3["det"]; print("determinism:", d, "| error:", repr(err3))
+d = st3["det"]; d["armed_when_idle"] = int(st3.get("active_callbacks", 0)); print("determinism:", d, "| error:", repr(err3))
 assert d["armed_when_idle"] == 0, "savestate callback leaked while idle"
 assert not err3, f"bridge emitted an error during replay determinism test: {err3!r}"
 assert d["loads"] == [d["base"] + 7] * 3, (

@@ -37,6 +37,9 @@ def one_run():
     ipc=Path(tempfile.mkdtemp(prefix='lua_state_replay_'))
     os.environ.update({'MESEN_RL_IPC_DIR':str(ipc),'MESEN_RL_W':'8','MESEN_RL_H':'8','MESEN_RL_FRAME_SKIP':'4','MESEN_RL_AUTO_BOOT':'0','MESEN_RL_LOCKSTEP':'1','MESEN_RL_LOCKSTEP_TIMEOUT':'20','MESEN_RL_LOCKSTEP_SLICE':'0.25','MESEN_RL_STRICT_LOCKSTEP':'1','MESEN_RL_STRICT_WAIT_S':'0.70'})
     L=lua.luaL_newstate(); lua.luaL_openlibs(L); execfile(L,ROOT/'tests/mock_emu.lua'); execfile(L,ROOT/'mesen/bridge.lua')
+    api_info = (ipc/'api_info.txt').read_text(encoding='utf-8')
+    if 'strict_lockstep=true' not in api_info:
+        raise AssertionError(f'replay harness did not activate strict lockstep:\n{api_info}')
     state={'done':False}
     def send(line):
         tmp=ipc/'h.tmp'; tmp.write_text(line+'\n'); os.replace(tmp,ipc/'command.in')

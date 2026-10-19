@@ -1,5 +1,5 @@
 """Exact path of the user's failure: record mode (human plays), auto-boot, repeated SAVE_TO."""
-import os, time, threading, tempfile
+import os, sys, time, threading, tempfile
 from pathlib import Path
 import pytest
 lupa = pytest.importorskip("lupa")
@@ -7,13 +7,17 @@ lupa = pytest.importorskip("lupa")
 from pathlib import Path as _P
 HERE = _P(__file__).resolve().parent
 ROOT = HERE.parent
+sys.path.insert(0, str(HERE))
+from lua_test_support import install_lua_test_environment
 BRIDGE = str(ROOT / "mesen" / "bridge.lua")
 
 def run(bridge=BRIDGE, prelude="", ack_timeout=5):
     ipc = Path(tempfile.mkdtemp())
-    os.environ.update({"MESEN_RL_IPC_DIR": str(ipc), "MESEN_RL_W": "8", "MESEN_RL_H": "8", "MESEN_RL_FRAME_SKIP": "4",
-        "MESEN_RL_AUTO_BOOT": "1", "MESEN_RL_RECORD_MODE": "1", "MESEN_RL_LOCKSTEP": "1"})
+    env = {"MESEN_RL_IPC_DIR": str(ipc), "MESEN_RL_W": "8", "MESEN_RL_H": "8", "MESEN_RL_FRAME_SKIP": "4",
+        "MESEN_RL_AUTO_BOOT": "1", "MESEN_RL_RECORD_MODE": "1", "MESEN_RL_LOCKSTEP": "1"}
+    os.environ.update(env)
     lua = lupa.LuaRuntime()
+    install_lua_test_environment(lua, env)
     lua.execute((HERE / "mock_emu.lua").read_text())
     lua.execute(prelude)
     lua.execute(Path(bridge).read_text())

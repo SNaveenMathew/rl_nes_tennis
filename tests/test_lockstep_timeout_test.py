@@ -1,4 +1,4 @@
-import os, time, threading, tempfile
+import os, sys, time, threading, tempfile
 from pathlib import Path
 import pytest
 lupa = pytest.importorskip("lupa")
@@ -6,6 +6,8 @@ lupa = pytest.importorskip("lupa")
 from pathlib import Path as _P
 HERE = _P(__file__).resolve().parent
 ROOT = HERE.parent
+sys.path.insert(0, str(HERE))
+from lua_test_support import install_lua_test_environment
 BRIDGE = str(ROOT / "mesen" / "bridge.lua")
 
 def run(delays, slice_s=None, frame_skip=4):
@@ -16,6 +18,7 @@ def run(delays, slice_s=None, frame_skip=4):
     if slice_s is not None: env["MESEN_RL_LOCKSTEP_SLICE"] = str(slice_s)
     os.environ.pop("MESEN_RL_LOCKSTEP_SLICE", None); os.environ.update(env)
     lua = lupa.LuaRuntime()
+    install_lua_test_environment(lua, env)
     lua.execute((HERE / "mock_emu.lua").read_text())
     lua.execute(Path(BRIDGE).read_text())
     mock = lua.globals().mock
