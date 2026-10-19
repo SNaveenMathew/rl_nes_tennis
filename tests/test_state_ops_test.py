@@ -16,9 +16,10 @@ def run(bridge_path, script):
         "MESEN_RL_LOCKSTEP_TIMEOUT": "20", "MESEN_RL_STRICT_LOCKSTEP": "1",
         "MESEN_RL_STRICT_WAIT_S": "0.70"}
     os.environ.update(env)
-    # Strict lockstep waits inside a Lua callback for the host thread to publish
-    # the next command. Explicitly inject the environment because embedded Lua
-    # on Windows may not see Python's runtime os.environ updates.
+    # The record-mode test runs during pytest collection and leaves its process
+    # environment mutated. Explicit injection prevents its RECORD_MODE=1 from
+    # leaking here (RECORD_MODE intentionally disables lockstep in the bridge).
+    # It also avoids relying on embedded Lua seeing Python runtime env changes.
     lua = lupa.LuaRuntime()
     install_lua_test_environment(lua, env)
     lua.execute((HERE / "mock_emu.lua").read_text())
@@ -26,9 +27,10 @@ def run(bridge_path, script):
     mock = lua.globals().mock
     api_info = (ipc / "api_info.txt").read_text(encoding="utf-8")
     if bridge_path == str(ROOT / "mesen" / "bridge.lua"):
-        assert "strict_lockstep=true" in api_info, (
+        assert "lockstep=true" in api_info and "strict_lockstep=true" in api_info, (
             "test configuration did not reach Lua; refusing to run replay determinism "
-            f"checks in soft lockstep. api_info.txt:\n{api_info}"
+            "checks unless BOTH lockstep and strict lockstep are active. "
+            f"api_info.txt:\n{api_info}"
         )
     state = {"done": False, "log": []}
 
