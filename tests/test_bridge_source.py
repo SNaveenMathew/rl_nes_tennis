@@ -79,3 +79,12 @@ def test_bridge_score_reset_game_tracking_and_sticky_peaks():
     assert "max_player_score_seen" in source
     assert "max_opponent_score_seen" in source
     assert "game_ended" in source
+
+
+def test_bridge_normalizes_windows_crlf_and_savestate_paths():
+    """CRLF commands must not leave a carriage return attached to a state path."""
+    source = Path("mesen/bridge.lua").read_text(encoding="utf-8")
+    assert 'line = line:gsub("\\r$", "")' in source
+    assert "normalize_file_path(rest)" in source
+    assert "normalize_file_path(path)" in source
+    assert 'local IPC_DIR = (os.getenv("MESEN_RL_IPC_DIR") or "runs/mesen_ipc/worker"):gsub("\\\\", "/")' in source

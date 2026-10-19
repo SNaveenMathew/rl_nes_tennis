@@ -24,7 +24,7 @@ Command:
 python -m pytest -q
 ```
 
-Result: **64 passed, 4 skipped** (6.73 seconds in this sandbox). The skipped cases depend on Lua embedding (`lupa`), which is not installed in this sandbox. These skipped tests still need to run on the Windows environment with the project's required dependencies installed.
+Result after the Windows savestate-path fix: **65 passed, 4 skipped** (7.40 seconds in this sandbox). The skipped cases depend on Lua embedding (`lupa`), which is not installed in this sandbox. These skipped tests still need to run on the Windows environment with the project's required dependencies installed.
 
 The suite includes a regression test demonstrating that deterministic hierarchy inference must choose a root phase first and then choose a skill conditionally within that branch. It also covers unknown annotations/durations and guards against making segment length or point outcomes into fabricated local action labels.
 
@@ -72,6 +72,14 @@ Result: 3 mock hierarchical PPO updates completed with finite losses (`0.236`, `
 - Evaluation treats unresolved/truncated point outcomes as unknown, not wins or losses. For valid comparisons, use the same savestate manifest, split, repeat count, random seed and episode horizon.
 
 Human annotation and external game-state validation are still necessary. No ground-truth ball position or contact event is inferred from the former pixel-motion-centroid heuristic.
+
+## Windows savestate-path regression fix (user-reported pytest failure)
+
+The reported failures in `tests/test_record_mode_test.py` and `tests/test_state_ops_test.py` showed `io.open(..., "wb")` rejecting a `SAVE_TO` target whose name ended with a Windows-style mixed path and a hidden carriage return. The tests write commands with Python text-mode `Path.write_text()` on Windows (CRLF), while the Lua bridge opens `command.in` in binary mode. Lua can therefore return a command line ending in `\r`; because `SAVE_TO` captures the rest of the line as a path, that CR can become part of the filename. Token-based commands can appear normal, which made this failure easy to miss.
+
+The bridge now strips a trailing carriage return from every mailbox command before parsing it, normalizes the IPC directory and explicit `SAVE_TO` / `LOAD_FROM` paths to forward slashes, and has a source regression test for these safeguards. This keeps the command protocol compatible with both LF-only byte writes from `MesenWorker` and CRLF commands from Windows text-mode test/helper code.
+
+Validation in this Linux sandbox: `python -m compileall -q tennis_rl tests` passed; `python -m pytest -q` passed **65 tests, 4 skipped**. The skipped Lua-embedding tests could not execute here because `lupa` is not installed. The two user-reported tests should be rerun on Windows with `lupa` installed; I have not claimed a direct Windows/Mesen integration pass from this sandbox.
 
 ## MesenCE 2.2.1
 

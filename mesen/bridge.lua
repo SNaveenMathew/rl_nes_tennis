@@ -22,7 +22,17 @@
 --
 -- The policy receives only video. RAM is used only for reward diagnostics/reset.
 
-local IPC_DIR = os.getenv("MESEN_RL_IPC_DIR") or "runs/mesen_ipc/worker"
+-- Mesen's Windows Lua I/O can reject mixed-separator absolute paths on some builds.
+-- Canonicalize all bridge filesystem paths to forward slashes (accepted by Windows,
+-- Linux and macOS) before deriving the mailbox file names.
+local IPC_DIR = (os.getenv("MESEN_RL_IPC_DIR") or "runs/mesen_ipc/worker"):gsub("\\", "/")
+
+local function normalize_file_path(path)
+    -- Host paths may be produced by pathlib on Windows (backslashes), by shell
+    -- scripts (mixed separators), or by POSIX tools (forward slashes).
+    -- Keep the drive/UNC prefix intact while standardizing separators.
+    return tostring(path or ""):gsub("\\", "/")
+end
 local WIDTH = tonumber(os.getenv("MESEN_RL_W") or "84")
 local HEIGHT = tonumber(os.getenv("MESEN_RL_H") or "84")
 local FRAME_SKIP = tonumber(os.getenv("MESEN_RL_FRAME_SKIP") or "4")
@@ -186,7 +196,15 @@ local function read_command()
     local line = f:read("*l")
     f:close()
     os.remove(COMMAND_PATH)
-    if line then last_host_activity = os.time() end
+    if line then
+        -- Some Windows-side producers use text-mode write_text(), which emits
+        -- CRLF. This file is intentionally opened in binary mode, so Lua may
+        -- leave the carriage return attached to the final token/path unless we
+        -- remove it explicitly. A trailing CR makes SAVE_TO/LOAD_FROM paths
+        -- invalid on Windows while ordinary token commands appear to work.
+        line = line:gsub("\r$", "")
+        last_host_activity = os.time()
+    end
     return line
 end
 
@@ -223,12 +241,12 @@ local function apply_command(line)
         pending_op = {kind = "load"}
     elseif cmd == "SAVE_TO" then
         -- SAVE_TO <path>: write the current emulator state to a file.
-        if rest ~= "" then pending_op = {kind = "save_to", path = rest} end
+        if rest ~= "" then pending_op = {kind = "save_to", path = normalize_file_path(rest)} end
     elseif cmd == "LOAD_FROM" then
         -- LOAD_FROM <noop_frames> <path>: load a state file, then let N frames run
         -- with no input (so one saved state is not one fixed trajectory).
         local n, path = rest:match("^(%d+)%s+(.+)$")
-        if n and path then pending_op = {kind = "load_from", path = path, noop = tonumber(n)} end
+        if n and path then pending_op = {kind = "load_from", path = normalize_file_path(path), noop = tonumber(n)} end
     elseif cmd == "HOLD" then
         -- HOLD button_name N_frames  — hold any NES button for N frames.
         -- Valid button names: left, right, up, down, a, b, start, select.

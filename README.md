@@ -167,3 +167,8 @@ A hierarchy policy cannot be called a validated winning model until it is evalua
 ## Staged hierarchical training
 
 Follow [`STAGED_TRAINING_GUIDE.md`](STAGED_TRAINING_GUIDE.md) for the training order, MesenCE 2.2.1 setup, demonstration recording, annotation, checkpoint assembly, independent scenario evaluation, and online fine-tuning. See [`IMPLEMENTATION_TEST_REPORT.md`](IMPLEMENTATION_TEST_REPORT.md) for the exact sandbox checks performed and the limits of what they validate. See [`HIERARCHY_BLUEPRINT.md`](HIERARCHY_BLUEPRINT.md) and [`hierarchy_spec.json`](hierarchy_spec.json) for the task hierarchy.
+
+
+### Windows CRLF savestate-path fix
+
+The Lua bridge strips CRLF carriage returns from mailbox commands and normalizes explicit savestate paths. See `IMPLEMENTATION_TEST_REPORT.md` for the regression details and sandbox test results.
