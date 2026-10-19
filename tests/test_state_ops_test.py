@@ -73,22 +73,46 @@ def run(bridge_path, script, *, strict=False):
         except BaseException as exc:
             state["script_exception"] = exc
         finally:
+            # In strict mode every completed action/observation deliberately parks
+            # inside lockstep_wait(). The final observation has no subsequent
+            # action, so the host must send an explicit quit command; otherwise
+            # the bridge correctly fails closed at STRICT_WAIT_S and the test
+            # mistakes that expected idle shutdown for a replay failure.
+            # Send Q before marking the script complete, so the emulation-driving
+            # thread remains active until the bridge consumes it (see loop below).
+            if strict:
+                try:
+                    send("Q")
+                    state["shutdown_command_sent"] = True
+                except BaseException as exc:
+                    state["shutdown_exception"] = exc
             state["done"] = True
 
     th = threading.Thread(target=run_script, name="state-ops-test-script")
     th.start()
     t0 = time.time()
-    while not state["done"] and time.time() - t0 < 40:
+    while time.time() - t0 < 40:
+        # Once the host script is finished, continue driving the mock until its Q
+        # is actually consumed. This closes the race where the driver sees done
+        # before Lua has re-entered lockstep_wait() and would otherwise abandon Q.
+        if state["done"] and (not strict or mock.stopped is not None):
+            break
         mock.run_frame()
     th.join()
     if "script_exception" in state:
         exc = state["script_exception"]
         raise AssertionError(f"state-ops script thread failed: {exc!r}") from exc
+    if "shutdown_exception" in state:
+        exc = state["shutdown_exception"]
+        raise AssertionError(f"could not shut down strict-lockstep bridge cleanly: {exc!r}") from exc
+    if strict and mock.stopped is None:
+        raise AssertionError("strict-lockstep bridge did not consume the host Q command before the test deadline")
     err = ""
     p = ipc / "error.txt"
     if p.exists(): err = p.read_text()
     # Query Lua only from the emulation-driving thread, never the host helper.
     state["active_callbacks"] = int(mock.active_callbacks())
+    state["emulator_stopped"] = mock.stopped
     out = (state, int(mock.frame), int(mock.loaded or 0), err, ipc)
     return out
 
@@ -166,6 +190,11 @@ def script_det(c):
 st3, _, _, err3, ipc3 = run(str(ROOT / "mesen" / "bridge.lua"), script_det, strict=True)
 d = st3["det"]; d["armed_when_idle"] = int(st3.get("active_callbacks", 0)); print("determinism:", d, "| error:", repr(err3))
 assert d["armed_when_idle"] == 0, "savestate callback leaked while idle"
+assert st3.get("shutdown_command_sent"), "strict test host did not send graceful Q shutdown"
+assert st3.get("emulator_stopped") == 0, (
+    "strict bridge did not consume Q cleanly; expected emu.stop(0), got "
+    f"{st3.get('emulator_stopped')!r}"
+)
 assert not err3, f"bridge emitted an error during replay determinism test: {err3!r}"
 assert d["loads"] == [d["base"] + 7] * 3, (
     "LOAD_FROM 7 must always run exactly seven no-op frames before the next saved state; "

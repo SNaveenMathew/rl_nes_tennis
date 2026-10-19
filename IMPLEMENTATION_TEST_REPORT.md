@@ -1,52 +1,29 @@
-# NES Tennis RL implementation test report — legacy diagnostic compatibility fix
+# NES Tennis RL — strict replay test shutdown fix
 
-## Summary
+## What changed
 
-This revision fixes the latest Windows pytest collection error in `tests/test_state_ops_test.py`:
+The latest Windows trace showed that all replay frame assertions succeeded (`LOAD_FROM 7` produced `[base + 7] * 3`, `LOAD_FROM 0` produced `base + 1`, and all action gaps matched), but the test then failed with a strict-lockstep host-command timeout.
 
-```text
-FileNotFoundError: .../api_info.txt
-```
+This was a test-lifecycle bug, not a frame-count mismatch: after its *last* observation, the strict test host finished without sending another command. The bridge correctly remained parked waiting for the next command and then failed closed at its configured 0.701-second deadline. That timeout was expected under the protocol but should not be treated as a replay error when a test intentionally ends.
 
-The test helper runs both the current bridge and an archived Mesen 0.9.x bridge fixture. `api_info.txt` is a diagnostic file produced by the current bridge; the legacy fixture predates that file. The harness had been reading the file unconditionally before it determined which bridge was running.
+`tests/test_state_ops_test.py` now sends an explicit `Q` from its strict-mode cleanup path. Its emulator-driving loop continues until the Lua bridge consumes `Q` and calls `emu.stop(0)`, so the test does not return early and leave a race. The test asserts that the shutdown command was sent and consumed, and still asserts that `error.txt` is empty. The strict timeout and frame determinism assertions are not relaxed. A source-level regression test now protects this shutdown behavior even in environments where `lupa` is absent.
 
-The fix moves that behavior into `read_api_info_for_bridge()` in `tests/lua_test_support.py`:
+## Validation performed
 
-- For the current bridge, `api_info.txt` is required. If it is absent, the test fails with a targeted diagnostic because it cannot verify the requested lockstep mode.
-- For the legacy bridge fixture, an absent `api_info.txt` is expected and returns an empty string. Legacy compatibility checks continue to validate the behavior the fixture actually supports.
-- A regression test covers both branches and the present-metadata case.
-
-The fix does not weaken exact replay assertions, increase strict-lockstep timeouts, or change the production emulator bridge. It corrects a test-harness assumption about the legacy fixture's capabilities.
-
-## Validation performed in this sandbox
-
+- `python -m pytest -q`: **69 passed, 4 skipped**.
 - `python -m compileall -q tennis_rl tests scripts tools`: passed.
-- `python -m pytest -q -rs`: **68 passed, 4 skipped**.
 - `git diff --check`: passed.
-- Fresh ZIP extraction and archive integrity check: passed.
-- Native Lua 5.4 ctypes harness using the repository's actual `mesen/bridge.lua` and `tests/mock_emu.lua`: **20 consecutive full state-operation/replay runs passed**.
+- Native Lua 5.4 ctypes harness, using the repository's actual `mesen/bridge.lua` and `tests/mock_emu.lua`: **20 consecutive full replay runs passed** with graceful shutdown enabled. Every run produced base frame 12, three `LOAD_FROM 7` frames at 19, `LOAD_FROM 0` at 13, four-frame action gaps, four state loads, `emu.stop(0)`, and an empty bridge error file.
+- Clean archive extraction and archive integrity: passed.
 
-All 20 native Lua runs produced the expected values:
+## Limitation
 
-| Check | Expected | Observed in each run |
-|---|---:|---:|
-| Base snapshot frame | 12 | 12 |
-| Three `LOAD_FROM 7` snapshots | 19, 19, 19 | 19, 19, 19 |
-| `LOAD_FROM 0` snapshot | 13 | 13 |
-| Four-frame action-step gaps | 4, 4, 4, 4 | 4, 4, 4, 4 |
-| Savestate loads | 4 | 4 |
-| Bridge error file | empty | empty |
+Four integration modules use `pytest.importorskip("lupa")` and were skipped in this Linux sandbox because the `lupa` package is unavailable and package downloads are blocked. The native Lua test validates the same bridge script and mock emulator behavior, but does not substitute for running the complete Lupa-backed test on Windows/Mesen. The current change directly fixes the shutdown issue shown in the Windows trace; a final Windows pytest run is still required to confirm the Lupa integration path.
 
-### Skipped tests
+## Windows test command
 
-The four skipped modules are `tests/test_lockstep_test.py`, `tests/test_lockstep_timeout_test.py`, `tests/test_record_mode_test.py`, and `tests/test_state_ops_test.py`. Each calls `pytest.importorskip("lupa")`; the Python `lupa` package is not installed in this sandbox, and package download is unavailable. Consequently, the Windows/Lupa-specific module that exposed this error was not run in this Linux sandbox. The newly added metadata-compatibility regression test runs without Lupa as part of the 68 passing tests, and the separate native-Lua harness verifies the bridge's state restore/frame-count path, but neither is a substitute for executing the complete Lupa test on Windows.
-
-## Windows verification
-
-Extract this archive into a fresh directory, activate the `tennis_rl` environment, and run:
+After extracting this ZIP into a fresh directory and activating the project's `tennis_rl` environment:
 
 ```powershell
 python -m pytest -q
 ```
-
-The state-operations test should now pass the legacy fixture stage without attempting to read a nonexistent `api_info.txt`, then proceed to the strict replay assertions. Any subsequent failure should be treated as a new observed issue; this report does not claim a Windows run that has not been executed here.

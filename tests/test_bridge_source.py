@@ -130,3 +130,18 @@ def test_api_info_is_required_only_for_current_bridge(tmp_path):
 
     (tmp_path / "api_info.txt").write_text("lockstep=true\nstrict_lockstep=true wait=0.7s\n", encoding="utf-8")
     assert "strict_lockstep=true" in read_api_info_for_bridge(tmp_path, current, current)
+
+
+def test_strict_state_ops_harness_sends_q_after_final_observation():
+    """A strict replay test must terminate the final parked bridge cleanly."""
+    harness = Path("tests/test_state_ops_test.py").read_text(encoding="utf-8")
+    run_start = harness.index("    def run_script():")
+    driver_start = harness.index("    th = threading.Thread(target=run_script", run_start)
+    cleanup = harness[run_start:driver_start]
+    assert 'if strict:' in cleanup
+    assert 'send("Q")' in cleanup
+    assert 'state["shutdown_command_sent"] = True' in cleanup
+    driver_end = harness.index("    th.join()", driver_start)
+    driver = harness[driver_start:driver_end]
+    assert 'mock.stopped is not None' in driver
+    assert 'strict-lockstep bridge did not consume the host Q command' in harness
