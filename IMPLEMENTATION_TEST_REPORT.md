@@ -1,38 +1,52 @@
-# NES Tennis RL implementation test report — embedded Lua scheduler fix
+# NES Tennis RL implementation test report — legacy diagnostic compatibility fix
 
 ## Summary
 
-This revision addresses the intermittent `strict lockstep host-command timeout` that appeared during `tests/test_state_ops_test.py` collection on Windows. The generic save/load test was using strict replay mode even though it only checks that the state operations work. Strict mode has a deliberately sub-second deadline so an actual Mesen callback does not trip Mesen's script execution watchdog; that is too brittle for a generic I/O smoke test and for a same-process embedded-Lua test harness.
+This revision fixes the latest Windows pytest collection error in `tests/test_state_ops_test.py`:
 
-The test now separates the two concerns:
+```text
+FileNotFoundError: .../api_info.txt
+```
 
-- General `SAVE_TO`/`LOAD_FROM` coverage runs in soft lockstep and verifies the save/load API and binary payload without claiming deterministic frame timing.
-- The dedicated replay test runs with both `lockstep=true` and `strict_lockstep=true`, and refuses to execute exact frame assertions if `api_info.txt` does not confirm the required mode.
-- The bridge recognizes an optional `__MESEN_RL_TEST_YIELD` function only when an embedded test harness defines it. This lets the Python host thread run while Lupa is inside its Lua polling loop. The hook does not exist in ordinary Mesen execution, does not advance emulated frames, and does not relax or disable the strict timeout.
-- Environment injection remains per-Lua-runtime so `MESEN_RL_RECORD_MODE` and other settings cannot leak between pytest modules.
+The test helper runs both the current bridge and an archived Mesen 0.9.x bridge fixture. `api_info.txt` is a diagnostic file produced by the current bridge; the legacy fixture predates that file. The harness had been reading the file unconditionally before it determined which bridge was running.
 
-The strict frame deadline was **not** increased and the exact assertions were **not** weakened.
+The fix moves that behavior into `read_api_info_for_bridge()` in `tests/lua_test_support.py`:
+
+- For the current bridge, `api_info.txt` is required. If it is absent, the test fails with a targeted diagnostic because it cannot verify the requested lockstep mode.
+- For the legacy bridge fixture, an absent `api_info.txt` is expected and returns an empty string. Legacy compatibility checks continue to validate the behavior the fixture actually supports.
+- A regression test covers both branches and the present-metadata case.
+
+The fix does not weaken exact replay assertions, increase strict-lockstep timeouts, or change the production emulator bridge. It corrects a test-harness assumption about the legacy fixture's capabilities.
 
 ## Validation performed in this sandbox
 
-- `pytest -q`: **67 passed, 4 skipped**.
 - `python -m compileall -q tennis_rl tests scripts tools`: passed.
+- `python -m pytest -q -rs`: **68 passed, 4 skipped**.
 - `git diff --check`: passed.
-- Native Lua 5.4 bridge/state-operation stress harness using the repository's `mesen/bridge.lua` and `tests/mock_emu.lua`: **20 consecutive complete runs passed**.
+- Fresh ZIP extraction and archive integrity check: passed.
+- Native Lua 5.4 ctypes harness using the repository's actual `mesen/bridge.lua` and `tests/mock_emu.lua`: **20 consecutive full state-operation/replay runs passed**.
 
-Each native Lua replay run recorded:
+All 20 native Lua runs produced the expected values:
 
-| Check | Expected | Observed in all 20 runs |
+| Check | Expected | Observed in each run |
 |---|---:|---:|
-| Base frame | 12 | 12 |
+| Base snapshot frame | 12 | 12 |
 | Three `LOAD_FROM 7` snapshots | 19, 19, 19 | 19, 19, 19 |
 | `LOAD_FROM 0` snapshot | 13 | 13 |
-| Four-frame action gaps | 4, 4, 4, 4 | 4, 4, 4, 4 |
+| Four-frame action-step gaps | 4, 4, 4, 4 | 4, 4, 4, 4 |
 | Savestate loads | 4 | 4 |
-| Error file | empty | empty |
+| Bridge error file | empty | empty |
 
-## Remaining limitation
+### Skipped tests
 
-The four skipped tests use Python `lupa`; it is not installed in this Linux sandbox, and package download failed because the environment could not resolve the package host. Therefore, the exact Lupa-backed pytest module cannot be executed here. The standalone native-Lua test does exercise the actual Lua bridge, repeated savestate restores, no-op frame count, and action frame gaps, but it is not a live MesenCE 2.2.1 ROM test.
+The four skipped modules are `tests/test_lockstep_test.py`, `tests/test_lockstep_timeout_test.py`, `tests/test_record_mode_test.py`, and `tests/test_state_ops_test.py`. Each calls `pytest.importorskip("lupa")`; the Python `lupa` package is not installed in this sandbox, and package download is unavailable. Consequently, the Windows/Lupa-specific module that exposed this error was not run in this Linux sandbox. The newly added metadata-compatibility regression test runs without Lupa as part of the 68 passing tests, and the separate native-Lua harness verifies the bridge's state restore/frame-count path, but neither is a substitute for executing the complete Lupa test on Windows.
 
-On Windows, run `python -m pytest -q` from a fresh extraction. In particular, `tests/test_state_ops_test.py` should first report the basic save/load operation as successful in non-strict mode, then report identical `base + 7` and `base + 1` frame boundaries under strict mode.
+## Windows verification
+
+Extract this archive into a fresh directory, activate the `tennis_rl` environment, and run:
+
+```powershell
+python -m pytest -q
+```
+
+The state-operations test should now pass the legacy fixture stage without attempting to read a nonexistent `api_info.txt`, then proceed to the strict replay assertions. Any subsequent failure should be treated as a new observed issue; this report does not claim a Windows run that has not been executed here.

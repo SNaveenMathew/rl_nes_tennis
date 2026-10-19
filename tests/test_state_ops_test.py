@@ -7,7 +7,7 @@ from pathlib import Path as _P
 HERE = _P(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
-from lua_test_support import install_lua_test_environment
+from lua_test_support import install_lua_test_environment, read_api_info_for_bridge
 
 def run(bridge_path, script, *, strict=False):
     ipc = Path(tempfile.mkdtemp())
@@ -32,8 +32,11 @@ def run(bridge_path, script, *, strict=False):
     lua.execute((HERE / "mock_emu.lua").read_text())
     lua.execute(Path(bridge_path).read_text())
     mock = lua.globals().mock
-    api_info = (ipc / "api_info.txt").read_text(encoding="utf-8")
-    if bridge_path == str(ROOT / "mesen" / "bridge.lua"):
+    # The diagnostic file belongs to the current protocol; the legacy fixture
+    # predates it. Validate presence only for the implementation that promises it.
+    api_info = read_api_info_for_bridge(ipc, bridge_path, ROOT / "mesen" / "bridge.lua")
+    is_current_bridge = Path(bridge_path).resolve() == (ROOT / "mesen" / "bridge.lua").resolve()
+    if is_current_bridge:
         expected_strict = "strict_lockstep=true" if strict else "strict_lockstep=false"
         assert "lockstep=true" in api_info and expected_strict in api_info, (
             "test configuration did not reach Lua; expected lockstep plus "

@@ -109,3 +109,24 @@ def test_strict_lockstep_fails_closed_instead_of_advancing_on_host_delay():
     assert "strict lockstep host-command timeout" in source
     assert "emu.stop(38)" in source
     assert "return true  -- soft-lockstep yields one frame" in source
+
+
+def test_api_info_is_required_only_for_current_bridge(tmp_path):
+    """Legacy bridge fixtures need not implement current diagnostic metadata."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent))
+    from lua_test_support import read_api_info_for_bridge
+
+    current = Path("mesen/bridge.lua").resolve()
+    legacy = Path("tests/fixtures/original_bridge.lua").resolve()
+    assert read_api_info_for_bridge(tmp_path, legacy, current) == ""
+
+    try:
+        read_api_info_for_bridge(tmp_path, current, current)
+    except AssertionError as exc:
+        assert "did not write api_info.txt" in str(exc)
+    else:
+        raise AssertionError("current bridge metadata absence should be a test failure")
+
+    (tmp_path / "api_info.txt").write_text("lockstep=true\nstrict_lockstep=true wait=0.7s\n", encoding="utf-8")
+    assert "strict_lockstep=true" in read_api_info_for_bridge(tmp_path, current, current)
