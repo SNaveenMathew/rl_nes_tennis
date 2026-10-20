@@ -103,45 +103,27 @@ def test_load_from_noop_completion_is_a_lockstep_frame_barrier():
     assert ack < lockstep < wait < early_return
 
 
-def test_strict_lockstep_fails_closed_instead_of_advancing_on_host_delay():
-    source = Path("mesen/bridge.lua").read_text(encoding="utf-8")
-    assert 'MESEN_RL_STRICT_LOCKSTEP") == "1"' in source
-    assert "strict lockstep host-command timeout" in source
-    assert "emu.stop(38)" in source
-    assert "return true  -- soft-lockstep yields one frame" in source
-
-
-def test_api_info_is_required_only_for_current_bridge(tmp_path):
-    """Legacy bridge fixtures need not implement current diagnostic metadata."""
-    import sys
-    sys.path.insert(0, str(Path(__file__).parent))
-    from lua_test_support import read_api_info_for_bridge
-
-    current = Path("mesen/bridge.lua").resolve()
-    legacy = Path("tests/fixtures/original_bridge.lua").resolve()
-    assert read_api_info_for_bridge(tmp_path, legacy, current) == ""
-
-    try:
-        read_api_info_for_bridge(tmp_path, current, current)
-    except AssertionError as exc:
-        assert "did not write api_info.txt" in str(exc)
-    else:
-        raise AssertionError("current bridge metadata absence should be a test failure")
-
-    (tmp_path / "api_info.txt").write_text("lockstep=true\nstrict_lockstep=true wait=0.7s\n", encoding="utf-8")
-    assert "strict_lockstep=true" in read_api_info_for_bridge(tmp_path, current, current)
-
-
 def test_strict_state_ops_harness_sends_q_after_final_observation():
     """A strict replay test must terminate the final parked bridge cleanly."""
     harness = Path("tests/test_state_ops_test.py").read_text(encoding="utf-8")
     run_start = harness.index("    def run_script():")
     driver_start = harness.index("    th = threading.Thread(target=run_script", run_start)
     cleanup = harness[run_start:driver_start]
-    assert 'if strict:' in cleanup
+    assert "if strict:" in cleanup
     assert 'send("Q")' in cleanup
     assert 'state["shutdown_command_sent"] = True' in cleanup
     driver_end = harness.index("    th.join()", driver_start)
     driver = harness[driver_start:driver_end]
-    assert 'mock.stopped is not None' in driver
-    assert 'strict-lockstep bridge did not consume the host Q command' in harness
+    assert "mock.stopped is not None" in driver
+    assert "strict-lockstep bridge did not consume the host Q command" in harness
+
+
+
+def test_state_ops_harness_reads_api_info_only_for_current_bridge():
+    """Legacy bridge fixtures predate api_info.txt and must not be required to create it."""
+    harness = Path("tests/test_state_ops_test.py").read_text(encoding="utf-8")
+    branch_start = harness.index('    if Path(bridge_path).resolve() == (ROOT / "mesen" / "bridge.lua").resolve():')
+    api_path = harness.index('        api_info_path = ipc / "api_info.txt"', branch_start)
+    branch_end = harness.index('    state = {"done": False, "log": []}', branch_start)
+    assert branch_start < api_path < branch_end
+    assert 'assert api_info_path.is_file()' in harness[branch_start:branch_end]

@@ -7,7 +7,7 @@ from pathlib import Path as _P
 HERE = _P(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(HERE))
-from lua_test_support import install_lua_test_environment, read_api_info_for_bridge
+from lua_test_support import install_lua_test_environment
 
 def run(bridge_path, script, *, strict=False):
     ipc = Path(tempfile.mkdtemp())
@@ -32,11 +32,16 @@ def run(bridge_path, script, *, strict=False):
     lua.execute((HERE / "mock_emu.lua").read_text())
     lua.execute(Path(bridge_path).read_text())
     mock = lua.globals().mock
-    # The diagnostic file belongs to the current protocol; the legacy fixture
-    # predates it. Validate presence only for the implementation that promises it.
-    api_info = read_api_info_for_bridge(ipc, bridge_path, ROOT / "mesen" / "bridge.lua")
-    is_current_bridge = Path(bridge_path).resolve() == (ROOT / "mesen" / "bridge.lua").resolve()
-    if is_current_bridge:
+    # Only the current bridge publishes api_info.txt. The legacy fixture is
+    # intentionally an older protocol implementation and must be tested for
+    # its explicit SV failure without assuming current-bridge diagnostics.
+    if Path(bridge_path).resolve() == (ROOT / "mesen" / "bridge.lua").resolve():
+        api_info_path = ipc / "api_info.txt"
+        assert api_info_path.is_file(), (
+            "current bridge did not publish api_info.txt; bridge startup or "
+            f"test environment setup failed (IPC dir: {ipc})"
+        )
+        api_info = api_info_path.read_text(encoding="utf-8")
         expected_strict = "strict_lockstep=true" if strict else "strict_lockstep=false"
         assert "lockstep=true" in api_info and expected_strict in api_info, (
             "test configuration did not reach Lua; expected lockstep plus "
@@ -78,8 +83,8 @@ def run(bridge_path, script, *, strict=False):
             # action, so the host must send an explicit quit command; otherwise
             # the bridge correctly fails closed at STRICT_WAIT_S and the test
             # mistakes that expected idle shutdown for a replay failure.
-            # Send Q before marking the script complete, so the emulation-driving
-            # thread remains active until the bridge consumes it (see loop below).
+            # Send Q before marking the script complete, and keep driving the mock
+            # until Lua consumes it, to avoid a race with the final lockstep wait.
             if strict:
                 try:
                     send("Q")
@@ -92,9 +97,9 @@ def run(bridge_path, script, *, strict=False):
     th.start()
     t0 = time.time()
     while time.time() - t0 < 40:
-        # Once the host script is finished, continue driving the mock until its Q
-        # is actually consumed. This closes the race where the driver sees done
-        # before Lua has re-entered lockstep_wait() and would otherwise abandon Q.
+        # Once the host script is finished, keep driving strict mode until the
+        # bridge actually consumes Q (emu.stop(0)); merely seeing done=True is
+        # not enough because the emulator may still be parked in lockstep_wait().
         if state["done"] and (not strict or mock.stopped is not None):
             break
         mock.run_frame()

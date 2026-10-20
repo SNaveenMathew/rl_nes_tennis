@@ -5,16 +5,17 @@ lupa = pytest.importorskip("lupa")
 
 from pathlib import Path as _P
 HERE = _P(__file__).resolve().parent
-ROOT = HERE.parent
-sys.path.insert(0, str(HERE))
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
 from lua_test_support import install_lua_test_environment
+ROOT = HERE.parent
 BRIDGE = str(ROOT / "mesen" / "bridge.lua")
 
 def run(delays, slice_s=None, frame_skip=4):
     ipc = Path(tempfile.mkdtemp())
     env = {"MESEN_RL_IPC_DIR": str(ipc), "MESEN_RL_W": "8", "MESEN_RL_H": "8", "MESEN_RL_FRAME_SKIP": str(frame_skip),
            "MESEN_RL_AUTO_BOOT": "0", "MESEN_RL_LOCKSTEP": "1", "MESEN_RL_LOCKSTEP_TIMEOUT": "600",
-           "MESEN_RL_STRICT_LOCKSTEP": "0"}
+           "MESEN_RL_RECORD_MODE": "0", "MESEN_RL_CAPTURE_NATIVE": "0", "MESEN_RL_STRICT_LOCKSTEP": "0"}
     if slice_s is not None: env["MESEN_RL_LOCKSTEP_SLICE"] = str(slice_s)
     os.environ.pop("MESEN_RL_LOCKSTEP_SLICE", None); os.environ.update(env)
     lua = lupa.LuaRuntime()

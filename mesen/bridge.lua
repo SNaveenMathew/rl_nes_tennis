@@ -18,7 +18,9 @@
 -- Observation:
 --   O <token> <reward> <done> <player_score> <player_games>\n
 --     <opponent_score> <opponent_games> <point_end>\n
---   followed by WIDTH*HEIGHT raw grayscale bytes; token is host-generated.
+--   followed by WIDTH*HEIGHT raw grayscale bytes; in interactive recording with
+--   native capture enabled, 256*240*3 raw RGB bytes follow the grayscale payload.
+--   Token is host-generated.
 --
 -- The policy receives only video. RAM is used only for reward diagnostics/reset.
 
@@ -33,11 +35,13 @@ local function normalize_file_path(path)
     -- Keep the drive/UNC prefix intact while standardizing separators.
     return tostring(path or ""):gsub("\\", "/")
 end
-local WIDTH = tonumber(os.getenv("MESEN_RL_W") or "84")
-local HEIGHT = tonumber(os.getenv("MESEN_RL_H") or "84")
-local FRAME_SKIP = tonumber(os.getenv("MESEN_RL_FRAME_SKIP") or "4")
+local WIDTH = tonumber(os.getenv("MESEN_RL_W") or "128")
+local HEIGHT = tonumber(os.getenv("MESEN_RL_H") or "120")
+local FRAME_SKIP = tonumber(os.getenv("MESEN_RL_FRAME_SKIP") or "2")
 local GAME_LEVEL = tonumber(os.getenv("MESEN_RL_LEVEL") or "1")
 local RECORD_MODE = os.getenv("MESEN_RL_RECORD_MODE") == "1"
+-- Expensive native RGB capture is enabled only for human demonstration recording.
+local CAPTURE_NATIVE_FRAMES = RECORD_MODE and os.getenv("MESEN_RL_CAPTURE_NATIVE") == "1"
 local AUTO_BOOT = os.getenv("MESEN_RL_AUTO_BOOT") ~= "0"
 -- Lock-step mode: after each observation is published the emulator WAITS (inside
 -- the endFrame callback) for the host's next command, so the reply takes effect on
@@ -52,13 +56,10 @@ local LOCKSTEP = (os.getenv("MESEN_RL_LOCKSTEP") ~= "0") and not RECORD_MODE
 local LOCKSTEP_SLICE_S = tonumber(os.getenv("MESEN_RL_LOCKSTEP_SLICE") or "0.25")
 -- An orphaned emulator (host crashed) stops itself after this many silent seconds.
 local LOCKSTEP_TIMEOUT_S = tonumber(os.getenv("MESEN_RL_LOCKSTEP_TIMEOUT") or "600")
--- Strict mode is intended for deterministic scenario replay/evaluation, where
--- allowing even one timeout-driven idle frame changes the evaluated state.  It
--- waits for the next host command rather than advancing the emulator; if the
--- host does not respond before this deadline, it fails closed instead of
--- silently advancing a variable number of frames. Keep this below Mesen's Lua
--- callback timeout (usually 1s). Online training leaves this disabled because
--- PPO update time can be longer than one callback budget.
+-- Strict lockstep is for deterministic replay/evaluation. Unlike normal training,
+-- it fails closed if the host does not submit its next command within the deadline,
+-- rather than allowing a timeout-driven idle frame to change the evaluated state.
+-- Keep the deadline below Mesen's Lua callback watchdog (typically about 1 second).
 local STRICT_LOCKSTEP = os.getenv("MESEN_RL_STRICT_LOCKSTEP") == "1"
 local STRICT_LOCKSTEP_WAIT_S = tonumber(os.getenv("MESEN_RL_STRICT_WAIT_S") or "0.70")
 -- NES renders a fixed 256x240 framebuffer for this game.
@@ -132,18 +133,23 @@ local load_pending = false
 local stopped = false
 local held_buttons = {}  -- button_name -> frames_remaining; used by HOLD/START commands
 local last_host_activity = os.time()
--- Savestate machinery. In the original Mesen Lua API, emu.saveSavestate() returns the
--- state as a binary string and emu.loadSavestate(string) restores it, but both may
--- only be called from a startFrame event callback or a CPU-exec memory callback.
--- Requests are therefore queued here and carried out by perform_state_op(), which is
--- registered as a startFrame callback.
+-- Savestate machinery. Mesen 2's createSavestate/loadSavestate APIs must run from
+-- a CPU exec memory callback (not startFrame/endFrame). startFrame only arms a
+-- one-shot exec callback when work is queued, avoiding per-instruction overhead
+-- during normal training. Older API names are supported through the same path.
 local pending_op = nil          -- {kind="save"|"load"|"reset"|"save_to"|"load_from", path=, noop=}
+local state_op_callback_id = nil
+local state_op_callback_fired = false
+local state_op_callback_address = nil
+local EXEC_CALLBACK_TYPE = (emu.callbackType and emu.callbackType.exec)
+    or (emu.memCallbackType and (emu.memCallbackType.cpuExec or emu.memCallbackType.exec))
 local snapshot_pending = false  -- take the post-boot "match start" snapshot
 local ready_written = false
 local boot_complete_frames = 0
 local noop_remaining = 0        -- free-running no-op frames after LOAD_FROM
 local noop_ack_pending = false
 local state_op_wait = 0
+local screen_capture_wait_frames = 0
 local human_action = 0
 local interval_action = 0
 local interval_a_frames = 0
@@ -233,6 +239,7 @@ local function apply_command(line)
             pending_token = token
             step_pending = true
             frame_counter = 0
+            screen_capture_wait_frames = 0
         elseif token and action and ACTIONS[action + 1] then
             report_error("Invalid A/B pulse frame count; expected 1..FRAME_SKIP")
         end
@@ -362,27 +369,60 @@ local function read_u8(addr)
     return emu.read(addr, emu.memType.nesMemory or emu.memType.cpu or 0, false)
 end
 
+-- Mesen releases may expose the framebuffer only after the first rendered frame.
+-- getScreenBuffer is also zero-based in the documented API and has shipped with
+-- 239 visible rows on some builds. Detect either a zero- or one-based table and
+-- require a complete visible image before sampling it. Return nil to defer output
+-- rather than crashing the entire Lua bridge during emulator startup.
+local function get_valid_screen_buffer()
+    local ok, buffer = pcall(function() return emu.getScreenBuffer() end)
+    if not ok or type(buffer) ~= "table" then return nil end
+
+    local base = nil
+    if buffer[0] ~= nil then
+        base = 0
+    elseif buffer[1] ~= nil and buffer[SRC_W * (SRC_H - 1)] ~= nil then
+        -- Accommodate a 1-based Lua array if supplied by a compatible build.
+        base = 1
+    else
+        return nil
+    end
+
+    -- The known Mesen 2 API returns 239 rows (0..238); some variants return 240.
+    -- Validate the first and last pixel of each visible row used for resampling.
+    local visible_h = 0
+    for y = 0, SRC_H - 1 do
+        local first = buffer[base + y * SRC_W]
+        local last = buffer[base + y * SRC_W + (SRC_W - 1)]
+        if first == nil or last == nil then break end
+        visible_h = y + 1
+    end
+    if visible_h < 239 then return nil end
+    return buffer, base, visible_h
+end
+
 local function capture_frame_gray()
-    local buffer = emu.getScreenBuffer()
+    local buffer, base, source_h = get_valid_screen_buffer()
+    if buffer == nil then return nil end
     local out = {}
     local n = 0
     for y = 0, HEIGHT - 1 do
-        local sy0 = math.floor(y * SRC_H / HEIGHT)
-        local sy1 = math.floor((y + 1) * SRC_H / HEIGHT)
+        local sy0 = math.floor(y * source_h / HEIGHT)
+        local sy1 = math.floor((y + 1) * source_h / HEIGHT)
         if sy1 <= sy0 then sy1 = sy0 + 1 end
+        if sy1 > source_h then sy1 = source_h end
         for x = 0, WIDTH - 1 do
             local sx0 = math.floor(x * SRC_W / WIDTH)
             local sx1 = math.floor((x + 1) * SRC_W / WIDTH)
             if sx1 <= sx0 then sx1 = sx0 + 1 end
+            if sx1 > SRC_W then sx1 = SRC_W end
             local sum = 0.0
             local count = 0
             for sy = sy0, sy1 - 1 do
-                local row = sy * SRC_W
+                local row = base + sy * SRC_W
                 for sx = sx0, sx1 - 1 do
                     local argb = buffer[row + sx]
-                    if argb == nil then
-                        error(string.format("screen buffer nil at x=%d y=%d idx=%d", sx, sy, row + sx))
-                    end
+                    if argb == nil then return nil end
                     local r = math.floor(argb / 0x10000) % 0x100
                     local g = math.floor(argb / 0x100) % 0x100
                     local b = argb % 0x100
@@ -390,8 +430,33 @@ local function capture_frame_gray()
                     count = count + 1
                 end
             end
+            if count == 0 then return nil end
             n = n + 1
             out[n] = string.char(math.floor(sum / count + 0.5))
+        end
+    end
+    return table.concat(out)
+end
+
+-- Retain an RGB frame for annotation only. The model still receives grayscale
+-- observations. This protocol keeps a stable 256x240x3 payload: where Mesen exposes
+-- only 239 raster rows, the final payload row duplicates the last visible row.
+local function capture_frame_rgb()
+    local buffer, base, source_h = get_valid_screen_buffer()
+    if buffer == nil then return nil end
+    local out = {}
+    local n = 0
+    for y = 0, SRC_H - 1 do
+        local sy = math.min(y, source_h - 1)
+        local row = base + sy * SRC_W
+        for x = 0, SRC_W - 1 do
+            local argb = buffer[row + x]
+            if argb == nil then return nil end
+            local r = math.floor(argb / 0x10000) % 0x100
+            local g = math.floor(argb / 0x100) % 0x100
+            local b = argb % 0x100
+            n = n + 1
+            out[n] = string.char(r, g, b)
         end
     end
     return table.concat(out)
@@ -495,11 +560,17 @@ end
 
 local function send_observation()
     local frame = capture_frame_gray()
+    if frame == nil then return false end
+    local native_frame = ""
+    if CAPTURE_NATIVE_FRAMES then
+        native_frame = capture_frame_rgb()
+        if native_frame == nil then return false end
+    end
     local reward, done, player_score, player_games, opponent_score, opponent_games, point_end = compute_reward()
     if pending_token == nil then
         report_error("Observation requested without a pending host token")
         emu.stop(35)
-        return
+        return false
     end
     local token = pending_token
     local header
@@ -527,15 +598,19 @@ local function send_observation()
     local ready_tmp = OBS_READY_PREFIX .. suffix .. ".tmp"
     os.remove(ready_path)
     os.remove(obs_path)
-    if not atomic_write(obs_path, obs_tmp, header .. frame) then
+    if not atomic_write(obs_path, obs_tmp, header .. frame .. native_frame) then
         report_error("Failed to write observation mailbox: " .. obs_path)
-        emu.stop(31)
-        return
+        stopped = true
+        pcall(function() emu.stop(31) end)
+        return false
     end
     if not atomic_write(ready_path, ready_tmp, "READY\n") then
         report_error("Failed to publish observation readiness: " .. ready_path)
-        emu.stop(31)
+        stopped = true
+        pcall(function() emu.stop(31) end)
+        return false
     end
+    return true
 end
 
 local function button_action_index(input)
@@ -621,8 +696,9 @@ local function write_binary(path, data)
     return true
 end
 
--- Original Mesen: emu.saveSavestate(). Mesen2: emu.createSavestate(). Both return the
--- state as a string.
+-- Mesen 2 documents both createSavestate() and loadSavestate() as CPU-exec-only.
+-- We register a one-shot callback only when a state request is pending, so normal
+-- operation does not pay the cost of a callback on every CPU instruction.
 local SAVE_FN = emu.saveSavestate or emu.createSavestate
 local function create_state()
     if SAVE_FN == nil then
@@ -631,11 +707,8 @@ local function create_state()
     return SAVE_FN()
 end
 
--- Runs from the startFrame event callback (the only place, besides CPU-exec memory
--- callbacks, where this Mesen allows savestates). A no-op unless something is queued.
-local function perform_state_op()
+local function perform_state_op_in_exec()
     if stopped then return end
-    if not snapshot_pending and pending_op == nil then return end
     if snapshot_pending then
         snapshot_pending = false
         local ok, err = pcall(function() match_savestate = create_state() end)
@@ -644,9 +717,11 @@ local function perform_state_op()
         end
         write_ready()
     end
+
     local op = pending_op
     if not op then return end
     pending_op = nil
+    state_op_wait = 0
     if op.kind == "save" then
         local ok, err = pcall(function() saved_state = create_state() end)
         if ok and saved_state ~= nil then
@@ -680,10 +755,8 @@ local function perform_state_op()
         if ok and loaded ~= false then
             reset_tracking()
             if op.kind == "load_from" then
-                -- A LOAD_FROM acknowledgement denotes a stable replay boundary for
-                -- both N=0 and N>0. Defer it to endFrame so the bridge can hold the
-                -- post-load frame boundary until the host posts its next command.
-                -- This also avoids the old N=0 path racing ahead while the host wakes.
+                -- A LOAD_FROM acknowledgement denotes the state plus exactly N
+                -- subsequent no-op frame boundaries, then a stable lockstep barrier.
                 noop_remaining = math.max(0, math.floor(op.noop or 0))
                 noop_ack_pending = true
             else
@@ -695,12 +768,119 @@ local function perform_state_op()
     end
 end
 
-do
-    local ok, err = pcall(function() emu.addEventCallback(perform_state_op, emu.eventType.startFrame) end)
-    if not ok then
-        report_error("Could not register startFrame callback for savestates: " .. tostring(err))
+local function main_cpu_program_counter()
+    -- Mesen 2 exposes the current NES CPU PC through getState().cpu.pc. Keep
+    -- compatibility fallbacks for builds whose getCpuState() table is flatter.
+    local ok, state = pcall(function() return emu.getState() end)
+    if ok and type(state) == "table" then
+        local cpu = state.cpu
+        if type(cpu) == "table" then
+            local pc = tonumber(cpu.pc or cpu.PC or cpu.programCounter)
+            if pc and pc >= 0 and pc <= 0xFFFF then return math.floor(pc) end
+        end
     end
+    ok, state = pcall(function() return emu.getCpuState() end)
+    if ok then
+        if type(state) == "number" then
+            if state >= 0 and state <= 0xFFFF then return math.floor(state) end
+        elseif type(state) == "table" then
+            local pc = tonumber(state.pc or state.PC or state.programCounter)
+            if pc and pc >= 0 and pc <= 0xFFFF then return math.floor(pc) end
+        end
+    end
+    return nil
 end
+
+local function disarm_state_op_callback()
+    local id = state_op_callback_id
+    if id == nil then
+        state_op_callback_fired = false
+        state_op_callback_address = nil
+        return true
+    end
+
+    -- Do not remove a memory callback from inside that same memory callback:
+    -- Mesen iterates its callback list during dispatch. Removal is done by the
+    -- next startFrame/endFrame event, outside CPU memory-callback dispatch.
+    local ok, err = pcall(function()
+        emu.removeMemoryCallback(id, EXEC_CALLBACK_TYPE, state_op_callback_address, state_op_callback_address)
+    end)
+    if not ok then
+        report_error("Could not disarm completed savestate exec callback: " .. tostring(err))
+        stopped = true
+        pcall(function() emu.stop(37) end)
+        return false
+    end
+    state_op_callback_id = nil
+    state_op_callback_fired = false
+    state_op_callback_address = nil
+    return true
+end
+
+local function arm_state_op_callback()
+    if stopped then return end
+    -- Remove the previous instruction callback only after it has fired and
+    -- returned to a frame event. This avoids mutating Mesen's callback array
+    -- while it is being iterated by the CPU.
+    if state_op_callback_id ~= nil then
+        if state_op_callback_fired then
+            if not disarm_state_op_callback() then return end
+        else
+            return
+        end
+    end
+    if not snapshot_pending and pending_op == nil then return end
+    if type(emu.addMemoryCallback) ~= "function" or EXEC_CALLBACK_TYPE == nil then
+        local msg = "Savestate operations require emu.addMemoryCallback and an exec callback type"
+        report_error(msg)
+        stopped = true
+        pcall(function() emu.stop(37) end)
+        return
+    end
+
+    local pc = main_cpu_program_counter()
+    if pc == nil then
+        local msg = "Could not read main CPU program counter to schedule savestate operation"
+        report_error(msg)
+        stopped = true
+        pcall(function() emu.stop(37) end)
+        return
+    end
+
+    local fired = false
+    local function one_shot_exec_callback()
+        if fired then return end
+        fired = true
+        state_op_callback_fired = true
+        local ok, err = pcall(perform_state_op_in_exec)
+        if not ok then
+            report_error("Savestate operation callback failed: " .. tostring(err))
+            stopped = true
+            pcall(function() emu.stop(37) end)
+        end
+    end
+
+    -- Register only at the next CPU instruction's address. A 0..0xFFFF exec
+    -- callback would be invoked for every instruction in the frame after the
+    -- first operation, causing severe slowdown until endFrame removes it.
+    local ok, id = pcall(function()
+        return emu.addMemoryCallback(one_shot_exec_callback, EXEC_CALLBACK_TYPE, pc, pc)
+    end)
+    if not ok or id == nil then
+        report_error("Could not register one-shot exec callback for savestate operation: " .. tostring(id))
+        stopped = true
+        pcall(function() emu.stop(37) end)
+        return
+    end
+    state_op_callback_id = id
+    state_op_callback_address = pc
+end
+
+-- startFrame is only the safe time to arm a deferred CPU-exec callback; the
+-- savestate API itself runs inside that callback, as required by Mesen 2.
+pcall(function()
+    emu.addEventCallback(arm_state_op_callback, emu.eventType.startFrame)
+end)
 
 -- Write the API names this Mesen build exposes, so a mismatch is diagnosable from
 -- api_info.txt instead of guessed at.
@@ -709,7 +889,7 @@ local function write_api_info()
     for k, _ in pairs(emu) do names[#names + 1] = tostring(k) end
     table.sort(names)
     lines[#lines + 1] = "emu: " .. table.concat(names, ", ")
-    for _, enum_name in ipairs({"eventType", "memType"}) do
+    for _, enum_name in ipairs({"eventType", "memType", "callbackType", "cpuType"}) do
         local e = emu[enum_name]
         if type(e) == "table" then
             local m = {}
@@ -756,18 +936,14 @@ local function lockstep_wait()
                 -- Lupa-based tests embed Lua in the same process as the Python
                 -- host thread. Some Lupa builds keep the GIL while executing Lua,
                 -- so a pure Lua busy loop can prevent the host thread from writing
-                -- command.in until STRICT_LOCKSTEP_WAIT_S expires. Production
-                -- Mesen runs in a separate process and never defines this hook.
-                -- In the test harness only, briefly yield the Python scheduler to
-                -- model the independent host process without advancing emulated
-                -- time or weakening the strict deadline.
+                -- command.in. Production Mesen runs in a separate process and does
+                -- not define this test-only hook.
                 local test_yield = rawget(_G, "__MESEN_RL_TEST_YIELD")
                 if type(test_yield) == "function" then pcall(test_yield) end
                 local elapsed = os.clock() - t0
                 if STRICT_LOCKSTEP then
-                    -- Scenario evaluation must be reproducible. A timeout-driven
-                    -- frame here would silently alter the next action's state, so
-                    -- stop and surface an explicit error instead of drifting.
+                    -- Scenario replay must be reproducible. A timeout-driven frame
+                    -- would silently alter the next action's state, so stop loudly.
                     if elapsed >= STRICT_LOCKSTEP_WAIT_S then
                         local msg = string.format(
                             "strict lockstep host-command timeout after %.3fs; emulator stopped to preserve replay determinism",
@@ -794,6 +970,9 @@ local function lockstep_wait()
 end
 
 local end_callback = emu.addEventCallback(function()
+    if state_op_callback_fired then
+        if not disarm_state_op_callback() then return end
+    end
     if stopped then return end
 
     local ok, err = pcall(function()
@@ -876,7 +1055,8 @@ local end_callback = emu.addEventCallback(function()
             noop_ack_pending = false
             write_text(IPC_DIR .. "/state_loaded.txt", "LOADED\n")
             if LOCKSTEP then
-                lockstep_wait()
+                local wait_ok = lockstep_wait()
+                if not wait_ok or stopped then return end
             end
             return
         end
@@ -899,14 +1079,29 @@ local end_callback = emu.addEventCallback(function()
         -- prevents observations from outrunning the learner and eliminates
         -- unbounded observation-file backlogs.
         if step_pending then
-            frame_counter = frame_counter + 1
+            if frame_counter < FRAME_SKIP then frame_counter = frame_counter + 1 end
             if frame_counter >= FRAME_SKIP then
-                send_observation()
-                step_pending = false
-                pending_token = nil
-                frame_counter = 0
-                last_host_activity = os.time()
-                lockstep_wait()
+                local sent = send_observation()
+                if sent then
+                    step_pending = false
+                    pending_token = nil
+                    frame_counter = 0
+                    screen_capture_wait_frames = 0
+                    last_host_activity = os.time()
+                    local wait_ok = lockstep_wait()
+                    if not wait_ok or stopped then return end
+                else
+                    -- Startup / savestate transitions can temporarily expose an
+                    -- empty framebuffer. Preserve the token and retry on the next
+                    -- rendered frame instead of terminating Mesen on a nil pixel.
+                    screen_capture_wait_frames = screen_capture_wait_frames + 1
+                    if screen_capture_wait_frames > 180 then
+                        report_error("Screen buffer remained unavailable or incomplete for 180 frames while producing observation token " .. tostring(pending_token))
+                        stopped = true
+                        pcall(function() emu.stop(34) end)
+                        return
+                    end
+                end
             end
         end
     end)

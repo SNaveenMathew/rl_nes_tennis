@@ -9,7 +9,6 @@ bridge defaults.
 """
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Mapping
 
 
@@ -33,23 +32,3 @@ def install_lua_test_environment(lua, overrides: Mapping[str, object]) -> None:
             return __native_getenv(name)
         end
     """)
-
-
-def read_api_info_for_bridge(ipc_dir, bridge_path, current_bridge_path) -> str:
-    """Read current-bridge diagnostics without imposing them on legacy fixtures.
-
-    ``api_info.txt`` is a diagnostic contract of the current bridge only. The
-    archived legacy fixture predates it, so an absent file is expected there.
-    Conversely, the current bridge must publish it or tests cannot verify which
-    lockstep mode actually ran.
-    """
-    ipc = Path(ipc_dir)
-    metadata_path = ipc / "api_info.txt"
-    is_current = Path(bridge_path).resolve() == Path(current_bridge_path).resolve()
-    if not metadata_path.exists():
-        if is_current:
-            raise AssertionError(
-                "current bridge did not write api_info.txt; cannot validate the lockstep mode"
-            )
-        return ""
-    return metadata_path.read_text(encoding="utf-8")

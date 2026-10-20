@@ -6,15 +6,20 @@ lupa = pytest.importorskip("lupa")
 
 from pathlib import Path as _P
 HERE = _P(__file__).resolve().parent
-ROOT = HERE.parent
-sys.path.insert(0, str(HERE))
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))
 from lua_test_support import install_lua_test_environment
+
+from pathlib import Path as _P
+HERE = _P(__file__).resolve().parent
+ROOT = HERE.parent
 BRIDGE = str(ROOT / "mesen" / "bridge.lua")
 
 def run(bridge=BRIDGE, prelude="", ack_timeout=5):
     ipc = Path(tempfile.mkdtemp())
     env = {"MESEN_RL_IPC_DIR": str(ipc), "MESEN_RL_W": "8", "MESEN_RL_H": "8", "MESEN_RL_FRAME_SKIP": "4",
-        "MESEN_RL_AUTO_BOOT": "1", "MESEN_RL_RECORD_MODE": "1", "MESEN_RL_LOCKSTEP": "1"}
+        "MESEN_RL_AUTO_BOOT": "1", "MESEN_RL_RECORD_MODE": "1", "MESEN_RL_LOCKSTEP": "1",
+        "MESEN_RL_CAPTURE_NATIVE": "0", "MESEN_RL_STRICT_LOCKSTEP": "0"}
     os.environ.update(env)
     lua = lupa.LuaRuntime()
     install_lua_test_environment(lua, env)
