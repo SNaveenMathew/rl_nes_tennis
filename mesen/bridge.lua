@@ -38,7 +38,7 @@ end
 local WIDTH = tonumber(os.getenv("MESEN_RL_W") or "128")
 local HEIGHT = tonumber(os.getenv("MESEN_RL_H") or "120")
 local FRAME_SKIP = tonumber(os.getenv("MESEN_RL_FRAME_SKIP") or "2")
-local GAME_LEVEL = tonumber(os.getenv("MESEN_RL_LEVEL") or "1")
+local GAME_LEVEL = math.max(1, math.min(5, math.floor(tonumber(os.getenv("MESEN_RL_LEVEL") or "1") or 1)))
 local RECORD_MODE = os.getenv("MESEN_RL_RECORD_MODE") == "1"
 -- Expensive native RGB capture is enabled only for human demonstration recording.
 local CAPTURE_NATIVE_FRAMES = RECORD_MODE and os.getenv("MESEN_RL_CAPTURE_NATIVE") == "1"
@@ -296,43 +296,48 @@ end
 
 local function get_boot_input()
     clear_buttons()
+    -- Mesen's inputPolled event is documented to fire once per emulated frame.
+    -- Treat these as frame numbers, and use one-frame button pulses. Holding Start
+    -- across a menu transition can confirm more than one menu and skip the level
+    -- screen, which leaves recording/training at the title screen or wrong mode.
     boot_frame = boot_frame + 1
 
-    -- Step 1: Wait for title screen to appear (60 frames)
+    -- A fresh ROM boot defaults the title-menu cursor to SINGLES GAME. Wait for
+    -- the title screen, then tap Start once to open the opponent-level selector.
     if boot_frame <= 60 then
         return BUTTONS
-    -- Step 2: Press Start (15 frames) to select Singles (1 Player: 1 Game)
-    elseif boot_frame <= 75 then
+    elseif boot_frame == 61 then
         BUTTONS["start"] = true
-        return BUTTONS
-    -- Step 3: Wait for Level Selection screen (40 frames)
-    elseif boot_frame <= 115 then
         return BUTTONS
     end
 
-    -- Step 4: Navigate to desired GAME_LEVEL (1 to 5)
-    local cur_f = 116
+    -- Allow the level selector to settle before any direction is pressed.
+    -- The selector starts at level 1; move right once per requested level above 1.
+    local level_nav_start = 102
+    local nav_gap = 16
     for step = 1, (GAME_LEVEL - 1) do
-        if boot_frame >= cur_f and boot_frame < cur_f + 8 then
-            BUTTONS["right"] = true
-            return BUTTONS
-        elseif boot_frame >= cur_f + 8 and boot_frame < cur_f + 20 then
+        local press_frame = level_nav_start + (step - 1) * nav_gap
+        if boot_frame == press_frame then
+            BUTTONS["right"] = true -- single-frame pulse, then release
             return BUTTONS
         end
-        cur_f = cur_f + 20
     end
 
-    -- Step 5: Press Start (15 frames) to confirm Level and start the match
-    if boot_frame >= cur_f and boot_frame < cur_f + 15 then
+    -- Confirm the selected difficulty with a fresh Start edge after the final
+    -- direction has been released. For level 1 this is the first frame of the
+    -- level-selection window; levels 2-5 add one spaced Right pulse each.
+    local confirm_frame = level_nav_start + (GAME_LEVEL - 1) * nav_gap
+    if boot_frame == confirm_frame then
         BUTTONS["start"] = true
         return BUTTONS
     end
 
-    -- Step 6: Wait for court transition / players to take positions
-    local finish_f = cur_f + 75
-    if boot_frame >= finish_f and not boot_complete then
+    -- Wait for court transition and player positioning before exposing READY to
+    -- the host. This shared bridge path is used by recording, training, and eval.
+    local finish_frame = confirm_frame + 120
+    if boot_frame >= finish_frame and not boot_complete then
         boot_complete = true
-        snapshot_pending = true  -- READY is written once the snapshot exists
+        snapshot_pending = true -- READY is written once the match-start snapshot exists
     end
 
     return BUTTONS
@@ -646,7 +651,10 @@ local input_callback = emu.addEventCallback(function()
         -- During automatic boot, even record mode must drive the menu. Once the
         -- match is ready, record mode stops overriding player-1 input and the
         -- human remains in control.
-        emu.setInput(0, current_input())
+        -- MesenCE 2.2.1 signature is setInput(input_table, port, subPort).
+        -- The old reversed argument order raises a Lua type error and silently
+        -- leaves the game at the title screen because no menu input is applied.
+        emu.setInput(current_input(), 0)
     end
 end, emu.eventType.inputPolled)
 

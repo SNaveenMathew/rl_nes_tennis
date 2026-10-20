@@ -151,6 +151,9 @@ class MesenWorker:
             "MESEN_RL_H": str(self.height),
             "MESEN_RL_FRAME_SKIP": str(self.frame_skip),
             "MESEN_RL_MATCH_GAMES": str(self.match_games),
+            # Do not inherit a stale shell setting that can strand recording,
+            # training, or evaluation on the title/level-selection screens.
+            "MESEN_RL_AUTO_BOOT": "1",
             "MESEN_RL_LEVEL": str(self.game_level),
             "MESEN_RL_POINT_WIN": str(self.point_win),
             "MESEN_RL_POINT_LOSS": str(self.point_loss),

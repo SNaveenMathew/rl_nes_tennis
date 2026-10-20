@@ -32,7 +32,10 @@ def run(lockstep: bool, host_delays, frame_skip=4):
     emu.addEventCallback = lambda fn, t: cbs.__setitem__(t, fn) or 1
     emu.read = lambda addr, mt, signed: 0
     emu.getScreenBuffer = lambda: lua.table_from([0x808080] * (256 * 240), )  # 1-based, shifted; fine for a mock
-    emu.setInput = lambda port, btns: state["inputs"].append(dict(btns.items()) if hasattr(btns, "items") else None)
+    def set_input(btns, port=0, subport=0):
+        assert hasattr(btns, "items"), "MesenCE setInput expects the input table first"
+        state["inputs"].append(dict(btns.items()))
+    emu.setInput = set_input
     emu.getInput = lambda port: lua.table()
     emu.createSavestate = lambda: "state"
     emu.loadSavestate = lambda s: None

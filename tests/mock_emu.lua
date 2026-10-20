@@ -10,7 +10,7 @@
 --     "Maximum execution time (...) exceeded." (Mesen default: 1000 ms, per callback).
 mock = {frame = 0, ram = {}, ev = {}, memory_callbacks = {}, next_ref = 1,
         in_startframe = false, in_exec = false, timeout = 1.0,
-        timeout_hits = 0, callback_errors = {}}
+        timeout_hits = 0, callback_errors = {}, input_history = {}}
 emu = {
   eventType = {reset = 0, nmi = 1, irq = 2, startFrame = 3, endFrame = 4, codeBreak = 5,
                stateLoaded = 6, stateSaved = 7, inputPolled = 8, scriptEnded = 10},
@@ -52,7 +52,25 @@ function emu.getScreenBuffer()
   mock.obs_frames[#mock.obs_frames + 1] = mock.frame   -- frame at which each observation is captured
   local t = {}; for i = 0, 256*240 do t[i] = 0x808080 end; return t
 end
-function emu.setInput(port, b) mock.last_input = b end
+-- Modern MesenCE 2.x is setInput(input, port, subPort); the intentionally
+-- legacy original_bridge.lua fixture still uses setInput(port, input). Support
+-- both in the shared mock, while source tests require the production bridge to
+-- use the modern order.
+function emu.setInput(first, second, third)
+  local input, port, subport
+  if type(first) == "table" then
+    input, port, subport = first, second or 0, third or 0
+  else
+    port, input, subport = first or 0, second, third or 0
+  end
+  assert(type(input) == "table", "emu.setInput expects an input table")
+  local copy = {}
+  for k, v in pairs(input) do copy[k] = v end
+  mock.last_input = copy
+  mock.input_history[#mock.input_history + 1] = {
+    frame = mock.frame, port = port, subport = subport, buttons = copy
+  }
+end
 function emu.getInput(port) return {} end
 function emu.stop(code) mock.stopped = code end
 local function check_allowed()
