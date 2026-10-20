@@ -4,7 +4,7 @@ from tennis_rl.model import RecurrentActorCritic
 
 class ModelTests(unittest.TestCase):
     def test_shapes_and_factorization(self):
-        model = RecurrentActorCritic(4, 27, [32, 64, 64], 256, 256)
+        model = RecurrentActorCritic(4, 27, [32, 64, 64], 256, 256, input_size=(84, 84))
         obs = torch.zeros(4, 2, 4, 84, 84)
         hidden = model.initial_hidden(2, torch.device("cpu"))
         dist, values, next_hidden = model.forward_sequence(obs, hidden)
@@ -17,7 +17,7 @@ class ModelTests(unittest.TestCase):
         self.assertTrue(torch.all((a >= 0) & (a < 27)))
 
     def test_act_returns_one_action_per_environment(self):
-        model = RecurrentActorCritic(4, 27, [32, 64, 64], 256, 256)
+        model = RecurrentActorCritic(4, 27, [32, 64, 64], 256, 256, input_size=(84, 84))
         obs = torch.zeros(8, 4, 84, 84)
         hidden = model.initial_hidden(8, torch.device("cpu"))
         actions, logp, values, next_hidden = model.act(obs, hidden, deterministic=False)
@@ -34,7 +34,7 @@ if __name__ == "__main__":
 def test_auxiliary_point_outcome_head():
     import torch
     from tennis_rl.model import RecurrentActorCritic
-    model = RecurrentActorCritic(4, 27, [32,64,64], 64, 64)
+    model = RecurrentActorCritic(4, 27, [32,64,64], 64, 64, input_size=(84, 84))
     obs = torch.zeros(5, 2, 4, 84, 84)
     h = model.initial_hidden(2, torch.device("cpu"))
     dist, values, hn, outcome = model.forward_sequence(obs, h, include_aux=True)
@@ -46,7 +46,7 @@ def test_auxiliary_point_outcome_head():
 def test_motion_target_and_auxiliary_head():
     import torch
     from tennis_rl.model import RecurrentActorCritic, compute_spatial_motion_target
-    model = RecurrentActorCritic(4, 27, [32, 64, 64], 64, 64)
+    model = RecurrentActorCritic(4, 27, [32, 64, 64], 64, 64, input_size=(84, 84))
     obs = torch.zeros(5, 2, 4, 84, 84)
     obs[:, :, 3, 40:44, 40:44] = 1.0  # simulate moving sprite
     targ = compute_spatial_motion_target(obs)
@@ -63,3 +63,13 @@ def test_motion_target_and_auxiliary_head():
     dist, values, hn, outcome, motion_pred = model.forward_sequence(obs, h, include_aux=True, include_motion=True)
     assert outcome.shape == (5, 2)
     assert motion_pred.shape == (5, 2, 2)
+
+
+def test_default_model_accepts_recommended_128x120_policy_input():
+    import torch
+    from tennis_rl.model import RecurrentActorCritic
+    model = RecurrentActorCritic(4, 27, [8, 16, 16], 32, 24).eval()
+    obs = torch.zeros((2, 4, 120, 128), dtype=torch.uint8)
+    with torch.no_grad():
+        actions, *_ = model.act(obs, model.initial_hidden(2, torch.device("cpu")), deterministic=True)
+    assert actions.shape == (2,)

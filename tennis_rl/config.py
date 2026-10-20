@@ -16,11 +16,14 @@ class MesenConfig:
     port_start: int = 39100
     startup_timeout_s: float = 20.0
     socket_timeout_s: float = 30.0
-    frame_skip: int = 4
+    # Keep collection, training, evaluation, and inference on the same temporal/spatial contract.
+    frame_skip: int = 2
     match_games: int = 6
     game_level: int = 1
-    observation_width: int = 84
-    observation_height: int = 84
+    observation_width: int = 128
+    observation_height: int = 120
+    # Native RGB is stored only by the human demonstration recorder, never by RL workers.
+    capture_native_frames: bool = True
     save_state_path: str = ""
     auto_reset_to_saved_state: bool = True
     reset_startup_frames: int = 0
@@ -32,9 +35,6 @@ class MesenConfig:
     # (deterministic frame timing). Ignored for human recording.
     lockstep: bool = True
     lockstep_timeout_s: float = 600.0
-    # Strictly frame-deterministic scenario evaluation must fail closed rather
-    # than advancing on host latency. Keep below Mesen's callback timeout.
-    strict_lockstep_wait_s: float = 0.70
 
 
 @dataclass
@@ -86,8 +86,8 @@ class PPOConfig:
     amp: bool = True
     total_steps: int = 5_000_000
     checkpoint_every_updates: int = 25
-    save_dir: str = "checkpoints"
-    tensorboard_dir: str = "runs"
+    save_dir: str = "checkpoints_native128x120"
+    tensorboard_dir: str = "runs_native128x120"
     max_step_checkpoints: int = 3
 
     # Imitation is supplemental supervision; do not infer the correctness of an
@@ -154,7 +154,7 @@ class HierarchicalConfig:
     durations: list[int] = field(default_factory=lambda: [1, 2, 4, 8])
     # Shot button pulse durations are measured in raw NES frames and must be
     # <= mesen.frame_skip. The bridge preserves movement while pulsing A/B.
-    button_pulse_durations: list[int] = field(default_factory=lambda: [1, 2, 4])
+    button_pulse_durations: list[int] = field(default_factory=lambda: [1, 2])
     hidden_dim: int = 128
     rollout_steps: int = 256
     learning_rate: float = 1e-4
@@ -170,8 +170,8 @@ class HierarchicalConfig:
     epochs: int = 3
     checkpoint_every_updates: int = 10
     max_step_checkpoints: int = 3
-    save_dir: str = "checkpoints_hierarchical"
-    log_dir: str = "runs_hierarchical"
+    save_dir: str = "checkpoints_hierarchical_native128x120"
+    log_dir: str = "runs_hierarchical_native128x120"
     # Inference and training are never allowed to apply heuristic task routing.
     # This flag only enables supervised manager targets from explicit scenario
     # metadata (e.g. the ROM's known server/receiver role at point start).

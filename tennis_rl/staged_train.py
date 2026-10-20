@@ -28,6 +28,7 @@ from .config import load_config
 from .hierarchical import HierarchicalActorCritic
 from .hierarchy_schema import EVENT_NAMES, PHASES, TASK_TO_PHASE
 from .task_data import TaskAnnotationDataset
+from .demonstrations import validate_demo_root_compatibility
 
 
 def seed_all(seed: int) -> None:
@@ -367,7 +368,10 @@ def _save(path: Path, model: HierarchicalActorCritic, cfg, stage: str, skill: st
         "init_from": str(source or ""),
         "config": {"channels": cfg.network.channels, "embedding_dim": cfg.network.embedding_dim,
                    "hidden_dim": cfg.hierarchical.hidden_dim, "gru_hidden": cfg.network.gru_hidden,
-                   "gru_layers": cfg.network.gru_layers},
+                   "gru_layers": cfg.network.gru_layers,
+                   "mesen": {"observation_width": cfg.mesen.observation_width,
+                             "observation_height": cfg.mesen.observation_height,
+                             "frame_skip": cfg.mesen.frame_skip}},
     }, path)
 
 
@@ -393,6 +397,16 @@ def main() -> int:
         parser.error("--stage leaf requires --skill")
 
     cfg = load_config(args.config)
+    try:
+        validate_demo_root_compatibility(
+            args.demo_root or cfg.ppo.demo_root,
+            observation_height=cfg.mesen.observation_height,
+            observation_width=cfg.mesen.observation_width,
+            frame_skip=cfg.mesen.frame_skip,
+            stack_size=cfg.environment.stack_size,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     if args.device:
         cfg.device = args.device
     seed_all(args.seed)

@@ -50,7 +50,7 @@ def main() -> None:
         raise SystemExit(f"no {args.split}/{args.phase} state for {args.cell}; coverage: {lib.coverage().get(args.cell)}")
     print(f"loading {state.path}  (match {state.match_id}, point {state.point_index}, step {state.step_in_point}, "
           f"human result: {state.demo_outcome})")
-    worker = build_workers(cfg, strict_lockstep=True)[0]
+    worker = build_workers(cfg)[0]
     try:
         worker.load_state_from(state.path, args.noop)
         end = time.time() + args.seconds

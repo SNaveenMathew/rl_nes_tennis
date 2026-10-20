@@ -2,7 +2,7 @@
   "seed": 42,
   "device": "cuda",
   "mesen": {
-    "executable": "C:/Games/MesenCE-2.2.1/Mesen.exe",
+    "executable": "C:/Games/NES/Mesen2.2.1/Mesen.exe",
     "rom": "C:/Users/dbznf/Documents/NES/Tennis (JU).nes",
     "lua_script": "mesen/bridge.lua",
     "workers": 12,
@@ -10,9 +10,9 @@
     "port_start": 39100,
     "startup_timeout_s": 20,
     "socket_timeout_s": 30,
-    "frame_skip": 4,
-    "observation_width": 84,
-    "observation_height": 84,
+    "frame_skip": 2,
+    "observation_width": 128,
+    "observation_height": 120,
     "save_state_path": "",
     "auto_reset_to_saved_state": true,
     "reset_startup_frames": 0,
@@ -22,7 +22,7 @@
     "transport": "file_mailbox",
     "capture_stderr": false,
     "lockstep": true,
-    "strict_lockstep_wait_s": 0.7
+    "capture_native_frames": true
   },
   "environment": {
     "action_count": 27,
@@ -66,8 +66,8 @@
     "amp": true,
     "total_steps": 5000000,
     "checkpoint_every_updates": 25,
-    "save_dir": "checkpoints",
-    "tensorboard_dir": "runs",
+    "save_dir": "checkpoints_native128x120",
+    "tensorboard_dir": "runs_native128x120",
     "max_step_checkpoints": 3,
     "demo_bc_coef": 0.5,
     "demo_bc_coef_start": 0.5,
@@ -162,8 +162,7 @@
     ],
     "button_pulse_durations": [
       1,
-      2,
-      4
+      2
     ],
     "hidden_dim": 128,
     "rollout_steps": 256,
@@ -180,8 +179,8 @@
     "epochs": 3,
     "checkpoint_every_updates": 10,
     "max_step_checkpoints": 3,
-    "save_dir": "checkpoints_hierarchical",
-    "log_dir": "runs_hierarchical",
+    "save_dir": "checkpoints_hierarchical_native128x120",
+    "log_dir": "runs_hierarchical_native128x120",
     "use_verified_start_role_labels": true
   }
 }

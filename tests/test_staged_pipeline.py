@@ -62,6 +62,9 @@ def test_stage_losses_train_explicit_leaf_and_phase_but_not_unlabeled_duration(t
         "path": rel, "start": 0, "end": 8, "leaf_task": "stroke_timing", "phase": "rally"
     }) + "\n", encoding="utf-8")
     cfg = Config()
+    # This fixture intentionally stores synthetic legacy-size 84x84 frames.
+    cfg.mesen.observation_width = 84
+    cfg.mesen.observation_height = 84
     cfg.network.channels = [8, 16, 16]
     cfg.network.embedding_dim = 32
     cfg.network.gru_hidden = 24

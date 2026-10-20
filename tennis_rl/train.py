@@ -15,7 +15,7 @@ import torch
 
 from .actions import ACTION_NAMES
 from .config import load_config
-from .demonstrations import DemonstrationDataset, summarize as summarize_demos
+from .demonstrations import DemonstrationDataset, summarize as summarize_demos, validate_demo_root_compatibility
 from .dqfd import DQFDTrainer, RecurrentDuelingQ, Sequence, pretrain_from_demonstrations
 from .env import ParallelTennis
 from .mesen_client import MesenWorker
@@ -54,9 +54,7 @@ def seed_everything(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def build_workers(cfg, *, strict_lockstep: bool = False):
-    if strict_lockstep and not cfg.mesen.lockstep:
-        raise ValueError("strict scenario replay requires mesen.lockstep=true")
+def build_workers(cfg):
     run_id = f"run_{time.strftime('%Y%m%d_%H%M%S')}_{random.getrandbits(40):010x}"
     return [
         MesenWorker(
@@ -81,11 +79,8 @@ def build_workers(cfg, *, strict_lockstep: bool = False):
             ipc_dir=cfg.mesen.ipc_dir,
             run_id=run_id,
             capture_stderr=cfg.mesen.capture_stderr,
-            headless=cfg.mesen.headless,
             lockstep=cfg.mesen.lockstep,
             lockstep_timeout_s=cfg.mesen.lockstep_timeout_s,
-            strict_lockstep=strict_lockstep,
-            strict_lockstep_wait_s=cfg.mesen.strict_lockstep_wait_s,
         )
         for i in range(cfg.mesen.workers)
     ]
@@ -319,6 +314,18 @@ def main():
         parser.error("Use either --resume (model+optimizer) or --init-from (weights only), not both")
 
     cfg = load_config(args.config)
+    try:
+        demo_compat = validate_demo_root_compatibility(
+            cfg.ppo.demo_root,
+            observation_height=cfg.mesen.observation_height,
+            observation_width=cfg.mesen.observation_width,
+            frame_skip=cfg.mesen.frame_skip,
+            stack_size=cfg.environment.stack_size,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if demo_compat["point_files"]:
+        print(f"Demonstration compatibility: {demo_compat}")
     if args.level is not None:
         cfg.mesen.game_level = args.level
     if args.workers is not None:
@@ -356,7 +363,7 @@ def main():
 
     # Initialize model dimensions
     with torch.no_grad():
-        dummy = torch.zeros((1, 4, 84, 84), device=device)
+        dummy = torch.zeros((1, cfg.environment.stack_size, cfg.mesen.observation_height, cfg.mesen.observation_width), device=device)
         model.act(dummy, model.initial_hidden(1, device))
 
     # Load demonstrations
@@ -620,7 +627,7 @@ def main():
         q_model = RecurrentDuelingQ(model).to(device)
         target = RecurrentDuelingQ(copy.deepcopy(model)).to(device)
         with torch.no_grad():
-            dummy = torch.zeros((1, 1, 4, 84, 84), device=device)
+            dummy = torch.zeros((1, 1, cfg.environment.stack_size, cfg.mesen.observation_height, cfg.mesen.observation_width), device=device)
             q_model(dummy, q_model.initial_hidden(1, device))
             target.load_state_dict(q_model.state_dict())
 

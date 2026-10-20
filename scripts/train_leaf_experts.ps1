@@ -1,8 +1,8 @@
 param(
     [string]$Config = "configs/scenario.json",
     [string]$DemoRoot = "demonstrations",
-    [string]$Foundation = "checkpoints_hierarchical/stages/foundation.pt",
-    [string]$OutDir = "checkpoints_hierarchical/stages",
+    [string]$Foundation = "checkpoints_hierarchical_native128x120/stages/foundation.pt",
+    [string]$OutDir = "checkpoints_hierarchical_native128x120/stages",
     [int]$Updates = 1000,
     [int]$BatchSize = 64,
     [int]$EvalEvery = 50,

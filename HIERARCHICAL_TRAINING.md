@@ -49,10 +49,10 @@ Edit the local ROM and Mesen paths in `configs/scenario.json` first. Example sho
 python -m tennis_rl.train --config configs/scenario.json --algo hierarchical --max-updates 3
 ```
 
-Default hierarchy checkpoint paths are configured by `hierarchical.save_dir` and `hierarchical.log_dir` (defaults: `checkpoints_hierarchical`, `runs_hierarchical`). Evaluate a hierarchy checkpoint with:
+Default hierarchy checkpoint paths are configured by `hierarchical.save_dir` and `hierarchical.log_dir` (defaults: `checkpoints_hierarchical_native128x120`, `runs_hierarchical_native128x120`). Evaluate a hierarchy checkpoint with:
 
 ```powershell
-python -m tennis_rl.evaluate --config configs/scenario.json --checkpoint checkpoints_hierarchical/hierarchical_latest.pt --episodes 20
+python -m tennis_rl.evaluate --config configs/scenario.json --checkpoint checkpoints_hierarchical_native128x120/hierarchical_latest.pt --episodes 20
 ```
 
 For a software-only sanity test without Mesen/ROM:

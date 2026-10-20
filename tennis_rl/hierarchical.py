@@ -20,7 +20,7 @@ from .model import VisualEncoder
 
 DEFAULT_SKILLS = DEFAULT_LEAF_TASKS
 DEFAULT_DURATIONS = (1, 2, 4, 8)
-DEFAULT_BUTTON_PULSE_DURATIONS = (1, 2, 4)
+DEFAULT_BUTTON_PULSE_DURATIONS = (1, 2)
 
 
 @dataclass
@@ -56,7 +56,7 @@ class HierarchicalActorCritic(nn.Module):
         hidden_dim: int = 128,
         skills: list[str] | tuple[str, ...] = DEFAULT_SKILLS,
         durations: list[int] | tuple[int, ...] = DEFAULT_DURATIONS,
-        input_size: tuple[int, int] = (84, 84),
+        input_size: tuple[int, int] = (120, 128),
         button_pulse_durations: list[int] | tuple[int, ...] = DEFAULT_BUTTON_PULSE_DURATIONS,
         gru_hidden_dim: int | None = None,
         gru_layers: int = 1,

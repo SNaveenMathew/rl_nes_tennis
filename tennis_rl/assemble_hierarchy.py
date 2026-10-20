@@ -2,10 +2,10 @@
 
 Example:
   python -m tennis_rl.assemble_hierarchy --config configs/scenario.json \
-    --base checkpoints_hierarchical/stages/foundation.pt \
-    --leaf serve_timing=checkpoints_hierarchical/stages/leaf_serve_timing.pt \
-    --leaf stroke_timing=checkpoints_hierarchical/stages/leaf_stroke_timing.pt \
-    --output checkpoints_hierarchical/stages/leaves_assembled.pt
+    --base checkpoints_hierarchical_native128x120/stages/foundation.pt \
+    --leaf serve_timing=checkpoints_hierarchical_native128x120/stages/leaf_serve_timing.pt \
+    --leaf stroke_timing=checkpoints_hierarchical_native128x120/stages/leaf_stroke_timing.pt \
+    --output checkpoints_hierarchical_native128x120/stages/leaves_assembled.pt
 
 Each leaf checkpoint must have been trained from the same base/foundation so its
 frozen encoder and recurrent state are identical. Only that named expert subtree

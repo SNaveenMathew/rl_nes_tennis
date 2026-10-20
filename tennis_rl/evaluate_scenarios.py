@@ -21,6 +21,7 @@ import torch
 from .config import load_config
 from .env import ParallelTennis
 from .hierarchical import HierarchicalActorCritic, HierarchicalController
+from .inference_compat import validate_checkpoint_runtime
 from .scenario_sampler import Assignment
 from .scenarios import StateRecord, load_manifest
 from .staged_train import load_weights, make_model
@@ -59,7 +60,7 @@ def main() -> int:
     parser.add_argument("--max-scenarios", type=int, default=0, help="0 means all compatible states")
     parser.add_argument("--skill", choices=["auto"] + list(__import__("tennis_rl.hierarchy_schema", fromlist=["DEFAULT_LEAF_TASKS"]).DEFAULT_LEAF_TASKS), default="auto",
                         help="Force one trained expert; use auto to evaluate learned gates")
-    parser.add_argument("--out", default="runs_hierarchical/evaluation.jsonl")
+    parser.add_argument("--out", default="runs_hierarchical_native128x120/evaluation.jsonl")
     parser.add_argument("--summary", default="")
     parser.add_argument("--device", default=None)
     parser.add_argument("--seed", type=int, default=42)
@@ -77,6 +78,7 @@ def main() -> int:
     device = torch.device(cfg.device)
     model = make_model(cfg).to(device)
     payload = _load_checkpoint(model, Path(args.checkpoint), device)
+    validate_checkpoint_runtime(payload, cfg, hierarchical=True)
     model.eval()
     forced_skill = None if args.skill == "auto" else args.skill
     if forced_skill and forced_skill not in model.skill_to_id:
@@ -109,23 +111,12 @@ def main() -> int:
                           stratum=rec.cell_id, phase=rec.phase,
                           state=rec, noop_frames=args.noop_frames)
 
-    # Warm the model before launching strict-lockstep workers. CUDA context and
-    # convolution-kernel initialization can otherwise consume the bridge's
-    # bounded command-wait budget while the new worker waits for its first action.
-    controller = HierarchicalController(model, deterministic=True)
-    warmup_obs = torch.zeros(
-        (1, cfg.environment.stack_size, cfg.mesen.observation_height, cfg.mesen.observation_width),
-        dtype=torch.uint8,
-        device=device,
-    )
-    with torch.inference_mode():
-        controller.act_with_pulse(warmup_obs)
-    controller.reset()
-    workers = build_workers(cfg, strict_lockstep=True)
+    workers = build_workers(cfg)
     env = ParallelTennis(workers, stack_size=cfg.environment.stack_size,
         max_steps=args.point_max_steps, point_episodes=True,
         point_max_steps=args.point_max_steps, scenario_provider=provider,
         segment_mode=False)
+    controller = HierarchicalController(model, deterministic=True)
     output_path = Path(args.out).resolve(); output_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path = Path(args.summary).resolve() if args.summary else output_path.with_suffix(".summary.json")
     overall = Counter(); by_scenario: dict[str, Counter] = defaultdict(Counter)

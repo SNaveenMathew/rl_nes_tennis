@@ -31,7 +31,7 @@ class VisualEncoder(nn.Module):
         in_channels: int,
         channels: list[int],
         embedding_dim: int,
-        input_size: tuple[int, int] = (84, 84),
+        input_size: tuple[int, int] = (120, 128),
     ):
         super().__init__()
         if in_channels < 2:
@@ -172,7 +172,7 @@ class RecurrentActorCritic(nn.Module):
         embedding_dim: int,
         gru_hidden: int,
         gru_layers: int = 1,
-        input_size: tuple[int, int] = (84, 84),
+        input_size: tuple[int, int] = (120, 128),
     ):
         super().__init__()
         if action_count != 27:

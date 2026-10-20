@@ -442,8 +442,8 @@ def run_hierarchical_training(
             for step in range(16):
                 obs_tensor = torch.from_numpy(smoke_obs).to(device)
                 with torch.no_grad():
-                    action = controller.act(obs_tensor)
-                batch = env.step(action.cpu().numpy())
+                    action, pulse_frames = controller.act_with_pulse(obs_tensor)
+                batch = env.step(action.cpu().numpy(), pulse_frames=pulse_frames.cpu().numpy())
                 smoke_obs = batch.observations.copy()
                 for i in np.flatnonzero(batch.dones):
                     smoke_obs[int(i)] = env.current_observation(int(i))

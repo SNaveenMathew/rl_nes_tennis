@@ -34,7 +34,7 @@ def test_collate_and_bc_loss(tmp_path):
     ds = DemonstrationDataset(tmp_path)
     batch = ds.sample(1, np.random.default_rng(0))
     obs, actions, mask, weights = collate_point_episodes(batch, torch.device("cpu"))
-    model = RecurrentActorCritic(4, 27, [32, 64, 64], 64, 64)
+    model = RecurrentActorCritic(4, 27, [32, 64, 64], 64, 64, input_size=(84, 84))
     loss = behavior_cloning_loss(model, obs, actions, mask, weights)
     assert loss.ndim == 0
     assert float(loss.detach()) >= 0.0
@@ -47,7 +47,7 @@ def test_partial_windows_and_outcome_supervision(tmp_path):
     windows = ds.sample_windows(2, np.random.default_rng(1))
     assert len(windows) == 2
     obs, actions, mask, outcome, rtg, weights = collate_windows(windows, torch.device("cpu"))
-    model = RecurrentActorCritic(4, 27, [32, 64, 64], 64, 64)
+    model = RecurrentActorCritic(4, 27, [32, 64, 64], 64, 64, input_size=(84, 84))
     bc, aux = partial_supervision_losses(model, obs, actions, mask, outcome, rtg, weights)
     assert bc.ndim == 0 and aux.ndim == 0
     assert float(aux.detach()) >= 0.0

@@ -10,7 +10,7 @@ def _trainer():
     cfg = PPOConfig(sequence_length=8, sequence_batch_size=2, demo_replay_capacity=10,
                     online_replay_capacity=10, demo_fraction=0.5, demo_pretrain_updates=1,
                     updates_per_rollout=1, target_update_every=2)
-    base = RecurrentActorCritic(4, 27, [16, 32, 32], 32, 32)
+    base = RecurrentActorCritic(4, 27, [16, 32, 32], 32, 32, input_size=(84, 84))
     model = RecurrentDuelingQ(base)
     import copy
     target = RecurrentDuelingQ(copy.deepcopy(base))

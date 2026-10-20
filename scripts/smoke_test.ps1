@@ -1,5 +1,5 @@
 param(
-  [string]$Config = "configs/base.json"
+  [string]$Config = "configs/scenario.json"
 )
 
 $ErrorActionPreference = "Stop"

@@ -12,7 +12,7 @@ from .model import RecurrentActorCritic
 
 @dataclass
 class Sequence:
-    obs: np.ndarray          # [T, 4, 84, 84], uint8
+    obs: np.ndarray          # [T, 4, H, W], uint8
     actions: np.ndarray      # [T]
     rewards: np.ndarray      # [T]
     dones: np.ndarray        # [T]
@@ -141,7 +141,13 @@ class DQFDTrainer:
     def _collate(self, sampled):
         max_t = max(int(s.obs.shape[0]) for s, _, _ in sampled)
         b = len(sampled)
-        obs = torch.zeros((max_t, b, 4, 84, 84), dtype=torch.uint8, device=self.device)
+        shape = tuple(sampled[0][0].obs.shape[1:])
+        if len(shape) != 3 or shape[0] != 4:
+            raise ValueError(f"Expected replay observations [T, 4, H, W], got {shape}")
+        if any(tuple(seq.obs.shape[1:]) != shape for seq, _, _ in sampled):
+            shapes = sorted({tuple(seq.obs.shape[1:]) for seq, _, _ in sampled})
+            raise ValueError(f"Cannot collate replay sequences with mixed observation shapes: {shapes}")
+        obs = torch.zeros((max_t, b, *shape), dtype=torch.uint8, device=self.device)
         actions = torch.zeros((max_t, b), dtype=torch.long, device=self.device)
         rewards = torch.zeros((max_t, b), dtype=torch.float32, device=self.device)
         dones = torch.ones((max_t, b), dtype=torch.float32, device=self.device)

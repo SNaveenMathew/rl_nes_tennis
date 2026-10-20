@@ -57,6 +57,59 @@ def iter_point_files(root: str | Path, *, level: int | None = None) -> list[Path
     return paths
 
 
+def validate_demo_root_compatibility(
+    root: str | Path,
+    *,
+    observation_height: int,
+    observation_width: int,
+    frame_skip: int,
+    stack_size: int = 4,
+) -> dict[str, object]:
+    """Fail early with a clear message when demonstrations disagree with config.
+
+    Pixel resizing cannot recover information discarded by an old recorder, and
+    inconsistent frame skips imply inconsistent timing for the same step index.
+    """
+    root = Path(root)
+    files = iter_point_files(root)
+    shapes: set[tuple[int, ...]] = set()
+    skips: set[int] = set()
+    unreadable: list[str] = []
+    for path in files:
+        try:
+            with np.load(path, allow_pickle=False) as data:
+                obs = np.asarray(data["observations"])
+                if obs.ndim != 4 or obs.shape[1] != stack_size:
+                    unreadable.append(path.as_posix())
+                    continue
+                shapes.add(tuple(int(x) for x in obs.shape[1:]))
+            sidecar = path.with_suffix(".json")
+            if sidecar.is_file():
+                row = json.loads(sidecar.read_text(encoding="utf-8"))
+                if row.get("frame_skip") is not None:
+                    skips.add(int(row["frame_skip"]))
+        except (OSError, ValueError, KeyError, json.JSONDecodeError, TypeError):
+            unreadable.append(path.as_posix())
+    expected = (int(stack_size), int(observation_height), int(observation_width))
+    mismatched = sorted(shape for shape in shapes if shape != expected)
+    if unreadable:
+        raise ValueError(
+            f"Could not validate {len(unreadable)} demonstration point file(s), e.g. {unreadable[0]}. "
+            "Run `python -m tennis_rl.dataset stats --demo-root <path>` and remove/fix malformed files."
+        )
+    if mismatched or len(shapes) > 1:
+        raise ValueError(
+            f"Demonstration observation shape(s) {sorted(shapes)} do not match configured policy shape {expected}. "
+            "Do not upscale old observations: move/delete old demonstrations and re-record them using the same config."
+        )
+    if skips and skips != {int(frame_skip)}:
+        raise ValueError(
+            f"Demonstration frame_skip values {sorted(skips)} do not match configured frame_skip={frame_skip}. "
+            "Set the same Mesen frame_skip for recording, training, and evaluation, or use a clean compatible dataset."
+        )
+    return {"point_files": len(files), "observation_shapes": sorted(shapes), "frame_skip_values": sorted(skips)}
+
+
 def _safe_load(path: Path, outcome_source: str = "point") -> PointEpisode | None:
     try:
         with np.load(path, allow_pickle=False) as data:
@@ -136,6 +189,12 @@ class DemonstrationDataset:
             ep = _safe_load(path, self.outcome_source)
             if ep is not None:
                 episodes.append(ep)
+        shapes = sorted({tuple(ep.observations.shape[1:]) for ep in episodes})
+        if len(shapes) > 1:
+            raise ValueError(
+                f"Demonstrations in {self.root} mix observation shapes {shapes}. "
+                "Start a clean demonstration directory and record all points using one configured resolution/frame-skip."
+            )
         self.episodes = episodes
 
     def __len__(self) -> int:
@@ -218,7 +277,13 @@ def collate_windows(windows: list[DemoWindow], device: torch.device):
         raise ValueError("Cannot collate empty demonstration batch")
     max_len = max(int(w.actions.shape[0]) for w in windows)
     batch = len(windows)
-    obs = torch.zeros((max_len, batch, 4, 84, 84), dtype=torch.uint8, device=device)
+    shape = tuple(windows[0].observations.shape[1:])
+    if len(shape) != 3 or shape[0] != 4:
+        raise ValueError(f"Expected demo observations with shape [T, 4, H, W], got {shape}")
+    if any(tuple(w.observations.shape[1:]) != shape for w in windows):
+        shapes = sorted({tuple(w.observations.shape[1:]) for w in windows})
+        raise ValueError(f"Cannot collate mixed observation resolutions: {shapes}. Record a clean, single-resolution dataset.")
+    obs = torch.zeros((max_len, batch, *shape), dtype=torch.uint8, device=device)
     actions = torch.zeros((max_len, batch), dtype=torch.long, device=device)
     mask = torch.zeros((max_len, batch), dtype=torch.bool, device=device)
     outcome = torch.zeros((max_len, batch), dtype=torch.float32, device=device)
@@ -226,7 +291,7 @@ def collate_windows(windows: list[DemoWindow], device: torch.device):
     weights = torch.ones((batch,), dtype=torch.float32, device=device)
     for j, w in enumerate(windows):
         n = int(w.actions.shape[0])
-        if w.observations.shape[1:] != (4, 84, 84):
+        if tuple(w.observations.shape[1:]) != shape:
             raise ValueError(f"Unexpected demonstration observation shape: {w.observations.shape}")
         obs[:n, j] = torch.from_numpy(w.observations).to(device)
         actions[:n, j] = torch.from_numpy(w.actions).to(device)

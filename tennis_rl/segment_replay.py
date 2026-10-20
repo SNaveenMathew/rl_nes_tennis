@@ -302,7 +302,13 @@ class DemoSegmentReplayer:
         B = len(segs)
         dev = self.device
 
-        obs = torch.zeros((T, B, 4, 84, 84), dtype=torch.uint8, device=dev)
+        shape = tuple(segs[0].obs.shape[1:])
+        if len(shape) != 3 or shape[0] != 4:
+            raise ValueError(f"Expected segment observations [T, 4, H, W], got {shape}")
+        if any(tuple(seg.obs.shape[1:]) != shape for seg in segs):
+            shapes = sorted({tuple(seg.obs.shape[1:]) for seg in segs})
+            raise ValueError(f"Cannot collate demonstration segments with mixed shapes: {shapes}")
+        obs = torch.zeros((T, B, *shape), dtype=torch.uint8, device=dev)
         actions = torch.zeros((T, B), dtype=torch.long, device=dev)
         outcome_target = torch.full((T, B), -1.0, dtype=torch.float32, device=dev)
         bc_weight = torch.zeros((T, B), dtype=torch.float32, device=dev)

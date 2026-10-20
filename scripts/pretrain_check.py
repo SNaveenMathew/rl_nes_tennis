@@ -135,7 +135,7 @@ def run_checks() -> bool:
         )).to(device)
 
         # Dry-run forward pass
-        dummy_input = torch.zeros((1, 1, 4, 84, 84), device=device)
+        dummy_input = torch.zeros((1, 1, cfg.environment.stack_size, cfg.mesen.observation_height, cfg.mesen.observation_width), device=device)
         h = q_model.initial_hidden(1, device)
         q_out, _ = q_model(dummy_input, h)
         print(f"  Model Forward Pass: OK (Q-values shape: {list(q_out.shape)})")
@@ -162,7 +162,7 @@ def run_checks() -> bool:
 
     # 6. Checkpoint & Log directories
     print("\n[6/6] Checking Directory Write Permissions...")
-    dirs_to_check = [Path("checkpoints"), Path("runs"), Path("runs/mesen_ipc")]
+    dirs_to_check = [Path("checkpoints_native128x120"), Path("runs_native128x120"), Path("checkpoints_hierarchical_native128x120"), Path("runs_hierarchical_native128x120"), Path("runs/mesen_ipc")]
     for d in dirs_to_check:
         d.mkdir(parents=True, exist_ok=True)
         test_file = d / ".write_test"

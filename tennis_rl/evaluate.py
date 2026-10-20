@@ -13,12 +13,13 @@ from .env import ParallelTennis
 from .mesen_client import MesenWorker
 from .model import RecurrentActorCritic
 from .hierarchical import HierarchicalActorCritic, HierarchicalController
+from .inference_compat import validate_checkpoint_runtime
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/scenario.json")
-    parser.add_argument("--checkpoint", default="checkpoints_hierarchical/hierarchical_latest.pt")
+    parser.add_argument("--checkpoint", default="checkpoints_hierarchical_native128x120/hierarchical_latest.pt")
     parser.add_argument("--episodes", type=int, default=20)
     parser.add_argument("--level", type=int, default=None, choices=range(1, 6), metavar="{1-5}",
                         help="CPU difficulty level (1-5, default from config).")
@@ -32,6 +33,10 @@ def main() -> None:
     if cfg.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA is unavailable.")
     device = torch.device(cfg.device)
+
+    payload = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    hierarchical = payload.get("format") == "tennis_rl_hierarchical_v2"
+    pulse_durations = validate_checkpoint_runtime(payload, cfg, hierarchical=hierarchical)
 
     run_id = f"run_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid()}_{random.getrandbits(40):010x}"
     workers = [
@@ -61,8 +66,6 @@ def main() -> None:
     ]
     env = ParallelTennis(workers, cfg.environment.stack_size, cfg.environment.episode_max_steps)
 
-    payload = torch.load(args.checkpoint, map_location=device, weights_only=False)
-    hierarchical = payload.get("format") == "tennis_rl_hierarchical_v1"
     controller = None
     if hierarchical:
         model = HierarchicalActorCritic(
@@ -74,6 +77,7 @@ def main() -> None:
             skills=payload.get("skills", cfg.hierarchical.skills),
             durations=payload.get("durations", cfg.hierarchical.durations),
             input_size=(cfg.mesen.observation_height, cfg.mesen.observation_width),
+            button_pulse_durations=pulse_durations or cfg.hierarchical.button_pulse_durations,
         ).to(device)
         model.load_state_dict(payload["model"])
         controller = HierarchicalController(model, deterministic=True)
@@ -111,12 +115,14 @@ def main() -> None:
         while completed < args.episodes:
             obs_t = torch.from_numpy(obs).to(device).float() / 255.0
             with torch.inference_mode():
+                pulse_frames = None
                 if controller is not None:
-                    actions = controller.act(obs_t)
+                    actions, pulse_frames = controller.act_with_pulse(obs_t)
                     next_hidden = None
                 else:
                     actions, _, _, next_hidden = model.act(obs_t, hidden, deterministic=True)
-            batch = env.step(actions.cpu().numpy())
+            pulse_np = pulse_frames.cpu().numpy() if pulse_frames is not None else None
+            batch = env.step(actions.cpu().numpy(), pulse_frames=pulse_np)
             current_rewards += batch.rewards
             obs = batch.observations.copy()
             hidden = next_hidden if next_hidden is not None else hidden

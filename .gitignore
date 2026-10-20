@@ -58,3 +58,9 @@ scenario_catalog.json
 # Hierarchical policy outputs
 checkpoints_hierarchical/
 runs_hierarchical/
+
+checkpoints_native128x120/
+runs_native128x120/
+checkpoints_hierarchical_native128x120/
+runs_hierarchical_native128x120/
+contact_sheets/
