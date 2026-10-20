@@ -20,6 +20,7 @@ from typing import Any
 
 import numpy as np
 
+from .actions import ACTION_NAMES
 from .demonstrations import _safe_load, iter_point_files
 from .hierarchy_schema import TASK_TO_PHASE, phase_for_task
 from .scenarios import split_for_match
@@ -97,6 +98,12 @@ def dataset_stats(root: str | Path) -> dict[str, Any]:
     malformed: list[str] = []
     match_paths: set[str] = set()
     scenario_tags: Counter[str] = Counter()
+    resolution_by_point: Counter[str] = Counter()
+    frame_skip_by_point: Counter[str] = Counter()
+    action_counts: Counter[str] = Counter()
+    native_point_count = 0
+    native_step_count = 0
+    native_malformed_count = 0
     pulse_coverage = Counter()
     for path in files:
         meta = _metadata(path)
@@ -111,6 +118,21 @@ def dataset_stats(root: str | Path) -> dict[str, Any]:
         counts[f"point_outcome_{ep.outcome}"] += 1
         counts["steps"] += ep.length
         total_frames += ep.length
+        height, width = int(ep.observations.shape[-2]), int(ep.observations.shape[-1])
+        resolution_by_point[f"{width}x{height}"] += 1
+        skip_value = meta.get("frame_skip")
+        frame_skip_by_point[str(skip_value) if skip_value is not None else "unknown"] += 1
+        with np.load(path, allow_pickle=False) as point_data:
+            if "native_frames" in point_data:
+                native = np.asarray(point_data["native_frames"])
+                if native.shape == (ep.length, 240, 256, 3):
+                    native_point_count += 1
+                    native_step_count += ep.length
+                else:
+                    native_malformed_count += 1
+        for action_id, count in zip(*np.unique(ep.actions, return_counts=True)):
+            name = ACTION_NAMES[int(action_id)] if 0 <= int(action_id) < len(ACTION_NAMES) else f"UNKNOWN_{int(action_id)}"
+            action_counts[name] += int(count)
         by_level[f"level_{ep.level}"] += 1
         by_match[match_key][ep.outcome] += 1
         if meta.get("serve_mode"):
@@ -142,6 +164,18 @@ def dataset_stats(root: str | Path) -> dict[str, Any]:
         "by_level": dict(sorted(by_level.items())),
         "serve_mode_counts": {k.removeprefix("serve_mode_"): int(v) for k, v in counts.items() if k.startswith("serve_mode_")},
         "scenario_tag_counts": dict(sorted(scenario_tags.items())),
+        "stored_observation_resolution_counts_by_point": dict(sorted(resolution_by_point.items())),
+        "recorded_frame_skip_counts_by_point": dict(sorted(frame_skip_by_point.items())),
+        "native_capture_coverage": {
+            "points_with_complete_native_rgb": int(native_point_count),
+            "valid_points": int(counts["points"]),
+            "fraction_of_valid_points": round(native_point_count / max(int(counts["points"]), 1), 4),
+            "native_rgb_steps": int(native_step_count),
+            "malformed_native_frame_points": int(native_malformed_count),
+            "expected_frame_shape": [240, 256, 3],
+            "note": "Native frames are optional for policy training and are used for review/annotation only.",
+        },
+        "controller_action_counts": dict(sorted(action_counts.items())),
         "button_pulse_label_coverage": {
             **{key: int(value) for key, value in pulse_coverage.items()},
             "known_fraction_of_shot_actions": round(pulse_coverage["known_pulse_labels"] / max(pulse_coverage["shot_actions"], 1), 4),

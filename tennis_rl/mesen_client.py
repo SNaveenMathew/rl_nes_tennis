@@ -50,8 +50,7 @@ class MesenWorker:
         record_mode: bool = False,
         lockstep: bool = True,
         lockstep_timeout_s: float = 600.0,
-        strict_lockstep: bool = False,
-        strict_lockstep_wait_s: float = 0.70,
+        capture_native_frames: bool = False,
     ) -> None:
         # host/port are retained for config backward compatibility; transport is
         # now local filesystem IPC and never opens a TCP socket.
@@ -81,15 +80,12 @@ class MesenWorker:
         self.capture_stderr = bool(capture_stderr)
         self.headless = bool(headless)
         self.record_mode = bool(record_mode)
+        self.capture_native_frames = self.record_mode and bool(capture_native_frames)
         # Lock-step: Mesen blocks between observations until the next action
         # arrives, so frame timing no longer depends on inference latency.
         # Never used while a human is playing (record mode).
         self.lockstep = bool(lockstep) and not self.record_mode
         self.lockstep_timeout_s = float(lockstep_timeout_s)
-        self.strict_lockstep = bool(strict_lockstep) and self.lockstep
-        self.strict_lockstep_wait_s = float(strict_lockstep_wait_s)
-        if not 0.05 <= self.strict_lockstep_wait_s < 0.90:
-            raise ValueError("strict_lockstep_wait_s must be between 0.05s and 0.90s, below Mesen's default Lua callback timeout")
 
         base = Path(ipc_dir or (Path("runs") / "mesen_ipc"))
         # Never reuse a mailbox directory across launches. This prevents stale
@@ -163,10 +159,9 @@ class MesenWorker:
             "MESEN_RL_MATCH_WIN": str(self.match_win),
             "MESEN_RL_MATCH_LOSS": str(self.match_loss),
             "MESEN_RL_RECORD_MODE": "1" if self.record_mode else "0",
+            "MESEN_RL_CAPTURE_NATIVE": "1" if self.capture_native_frames else "0",
             "MESEN_RL_LOCKSTEP": "1" if self.lockstep else "0",
             "MESEN_RL_LOCKSTEP_TIMEOUT": str(int(self.lockstep_timeout_s)),
-            "MESEN_RL_STRICT_LOCKSTEP": "1" if self.strict_lockstep else "0",
-            "MESEN_RL_STRICT_WAIT_S": str(self.strict_lockstep_wait_s),
         })
 
         creationflags = 0
@@ -388,7 +383,7 @@ class MesenWorker:
             f"Timed out waiting for observation token {token} after {timeout}s; mailbox={detail}"
         )
 
-    def _consume_observation(self) -> tuple[np.ndarray, float, bool, dict[str, int]]:
+    def _consume_observation(self) -> tuple[np.ndarray, float, bool, dict[str, Any]]:
         token = self.pending_token
         if token is None:
             raise BridgeError("No pending observation token")
@@ -442,15 +437,26 @@ class MesenWorker:
         a_pulse_frames = int(parts[10]) if len(parts) >= 11 else -1
         b_pulse_frames = int(parts[11]) if len(parts) >= 12 else -1
 
+        gray_bytes = self.width * self.height
         expected = self.width * self.height
+        native_bytes = 256 * 240 * 3 if getattr(self, "capture_native_frames", False) else 0
+        expected += native_bytes
         if len(payload) != expected:
+            detail = f"{gray_bytes} grayscale bytes"
+            if native_bytes:
+                detail += f" plus {native_bytes} native RGB bytes"
             raise BridgeError(
-                f"Malformed observation token {token}: expected {expected} grayscale bytes, "
+                f"Malformed observation token {token}: expected {detail} ({expected} total), "
                 f"got {len(payload)}"
             )
-        image = np.frombuffer(payload, dtype=np.uint8).reshape(
+        image = np.frombuffer(payload[:gray_bytes], dtype=np.uint8).reshape(
             self.height, self.width
         ).copy()
+        native_frame = None
+        if native_bytes:
+            native_frame = np.frombuffer(payload[gray_bytes:], dtype=np.uint8).reshape(
+                240, 256, 3
+            ).copy()
 
         self.pending_token = None
         info = {
@@ -464,6 +470,8 @@ class MesenWorker:
             "a_pulse_frames": a_pulse_frames,
             "b_pulse_frames": b_pulse_frames,
         }
+        if native_frame is not None:
+            info["native_frame"] = native_frame
         return image, reward, done, info
 
     @property
@@ -561,7 +569,7 @@ class MesenWorker:
         self._wait_for(ack, self.socket_timeout)
         self._unlink_when_released(ack)  # clear after Mesen writes it (may still be open on Windows)
 
-    def recv_observation(self) -> tuple[np.ndarray, float, bool, dict[str, int]]:
+    def recv_observation(self) -> tuple[np.ndarray, float, bool, dict[str, Any]]:
         return self._consume_observation()
 
     def ping(self) -> None:

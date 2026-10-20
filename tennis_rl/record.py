@@ -47,20 +47,46 @@ def _level_outcome_dir(root: Path, level: int, outcome: str, match_id: str) -> P
     return path
 
 
-def save_point(path: Path, observations: list[np.ndarray], actions: list[int], rewards: list[float], dones: list[bool], *, level: int, outcome: str, match_id: str, point_index: int, metadata: dict[str, object], pulse_frames: list[int] | None = None) -> None:
-    """Persist one point. Unknown pulse labels are -1; known raw-frame counts are positive."""
-    np.savez_compressed(
-        path,
-        observations=np.asarray(observations, dtype=np.uint8),
-        actions=np.asarray(actions, dtype=np.int64),
-        rewards=np.asarray(rewards, dtype=np.float32),
-        dones=np.asarray(dones, dtype=np.bool_),
-        pulse_frames=np.asarray(pulse_frames if pulse_frames is not None else [-1] * len(actions), dtype=np.int16),
-        level=np.asarray(level, dtype=np.int16),
-        outcome=np.asarray(outcome),
-        match_id=np.asarray(match_id),
-        point_index=np.asarray(point_index, dtype=np.int32),
-    )
+def save_point(
+    path: Path,
+    observations: list[np.ndarray] | np.ndarray,
+    actions: list[int] | np.ndarray,
+    rewards: list[float] | np.ndarray,
+    dones: list[bool] | np.ndarray,
+    *,
+    level: int,
+    outcome: str,
+    match_id: str,
+    point_index: int,
+    metadata: dict[str, object],
+    pulse_frames: list[int] | np.ndarray | None = None,
+    native_frames: list[np.ndarray] | np.ndarray | None = None,
+) -> None:
+    """Persist a point plus optional exact 256x240 RGB frames for human review.
+
+    ``observations`` remain compact grayscale policy inputs. Native RGB frames are
+    a separate sidecar array aligned one-to-one with observations and are never
+    consumed by the policy/network.
+    """
+    action_array = np.asarray(actions, dtype=np.int64)
+    arrays: dict[str, np.ndarray] = {
+        "observations": np.asarray(observations, dtype=np.uint8),
+        "actions": action_array,
+        "rewards": np.asarray(rewards, dtype=np.float32),
+        "dones": np.asarray(dones, dtype=np.bool_),
+        "pulse_frames": np.asarray(pulse_frames if pulse_frames is not None else [-1] * len(action_array), dtype=np.int16),
+        "level": np.asarray(level, dtype=np.int16),
+        "outcome": np.asarray(outcome),
+        "match_id": np.asarray(match_id),
+        "point_index": np.asarray(point_index, dtype=np.int32),
+    }
+    if native_frames is not None:
+        native = np.asarray(native_frames, dtype=np.uint8)
+        expected_shape = (len(action_array), 240, 256, 3)
+        if native.shape != expected_shape:
+            raise ValueError(f"native_frames must have shape {expected_shape}; got {native.shape}")
+        arrays["native_frames"] = native
+    np.savez_compressed(path, **arrays)
     path.with_suffix(".json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
 
@@ -82,6 +108,10 @@ def run(args: argparse.Namespace) -> int:
         raise ValueError(f"Unsupported serve mode: {serve_mode}")
     if args.level is not None:
         cfg.mesen.game_level = args.level
+    if getattr(args, "frame_skip", None) is not None:
+        if int(args.frame_skip) < 1:
+            raise ValueError("--frame-skip must be a positive number of raw NES frames")
+        cfg.mesen.frame_skip = int(args.frame_skip)
     output_root = Path(args.output)
     match_id = time.strftime("%Y%m%d-%H%M%S") + f"-{os.getpid()}-{random.getrandbits(24):06x}"
     worker = MesenWorker(
@@ -107,6 +137,7 @@ def run(args: argparse.Namespace) -> int:
         run_id=f"record_{match_id}",
         record_mode=True,
         headless=False,
+        capture_native_frames=cfg.mesen.capture_native_frames,
     )
 
     frames: deque[np.ndarray] = deque(maxlen=cfg.environment.stack_size)
@@ -115,6 +146,8 @@ def run(args: argparse.Namespace) -> int:
     rewards: list[float] = []
     dones: list[bool] = []
     pulse_frames: list[int] = []
+    native_frames: list[np.ndarray] = []
+    latest_native_frame: np.ndarray | None = None
     point_index = 0
     prev_p_score = 0
     prev_o_score = 0
@@ -137,6 +170,10 @@ def run(args: argparse.Namespace) -> int:
         "segmentation": "score-change-v2",
         "scenario_tag": str(getattr(args, "scenario_tag", "") or ""),
         "records_button_pulse_frames": True,
+        "capture_native_frames": bool(cfg.mesen.capture_native_frames),
+        "native_frame_shape": [240, 256, 3] if cfg.mesen.capture_native_frames else None,
+        "native_frame_format": "RGB" if cfg.mesen.capture_native_frames else None,
+        "policy_observation_format": "grayscale_uint8",
     }
 
     # ---- optional savestate harvesting for point-level scenario training ----
@@ -155,7 +192,11 @@ def run(args: argparse.Namespace) -> int:
         with h_manifest.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(row) + "\n")
 
+    decision_hz = 60.1 / max(cfg.mesen.frame_skip, 1)
+    native_text = "enabled (256x240 RGB per step)" if cfg.mesen.capture_native_frames else "disabled"
     print(f"Recording NES Tennis human demonstration | level={cfg.mesen.game_level}")
+    print(f"Policy input: {cfg.mesen.observation_width}x{cfg.mesen.observation_height} grayscale | native frames: {native_text}")
+    print(f"Frame skip: {cfg.mesen.frame_skip} raw NES frames/step (~{decision_hz:.1f} decisions/s)")
     print(f"Serve mode: {serve_mode} | recording game {record_game_number}")
     print(f"Output: {output_root.resolve()}")
     if serve_mode == "receive-first":
@@ -176,10 +217,15 @@ def run(args: argparse.Namespace) -> int:
         prev_p_games = initial_p_games
         prev_o_games = initial_o_games
         prev_game_total = initial_p_games + initial_o_games
+        latest_native_frame = info.get("native_frame")
+        if cfg.mesen.capture_native_frames and latest_native_frame is None:
+            raise BridgeError("Native frame capture was enabled but the Mesen bridge returned no native frame")
 
         while True:
             worker.action(0)
+            action_native_frame = latest_native_frame
             frame, reward, done, info = worker.recv_observation()
+            latest_native_frame = info.get("native_frame", latest_native_frame)
             current_stack = np.stack(tuple(frames), axis=0)
             human_action = int(info.get("human_action", 0))
             frames.append(frame)
@@ -196,7 +242,7 @@ def run(args: argparse.Namespace) -> int:
                 print("RECORDING STARTED: Game 2 / receive-first", flush=True)
                 # This step carries game 1's end reward. Do not let it leak into
                 # the first recorded point; start clean after the changeover.
-                observations, actions, rewards, dones, pulse_frames = [], [], [], [], []
+                observations, actions, rewards, dones, pulse_frames, native_frames = [], [], [], [], [], []
                 prev_p_score, prev_o_score = p_score, o_score
                 prev_p_games, prev_o_games, prev_game_total = p_games, o_games, game_total
                 in_dead_time = True
@@ -220,6 +266,10 @@ def run(args: argparse.Namespace) -> int:
 
             if recording_started:
                 observations.append(current_stack)
+                if cfg.mesen.capture_native_frames:
+                    if action_native_frame is None:
+                        raise BridgeError("Native frame capture disappeared during recording")
+                    native_frames.append(np.asarray(action_native_frame, dtype=np.uint8))
                 actions.append(human_action)
                 rewards.append(float(reward))
                 dones.append(bool(done))
@@ -257,6 +307,7 @@ def run(args: argparse.Namespace) -> int:
                     "rewards": np.asarray(rewards, dtype=np.float32),
                     "dones": np.asarray(dones, dtype=np.bool_),
                     "pulse_frames": np.asarray(pulse_frames, dtype=np.int16),
+                    "native_frames": np.asarray(native_frames, dtype=np.uint8) if cfg.mesen.capture_native_frames else None,
                     "point_index": point_index,
                     "p_score": p_score,
                     "o_score": o_score,
@@ -264,7 +315,7 @@ def run(args: argparse.Namespace) -> int:
                 }
                 # Store in a lightweight in-memory list attached to function scope.
                 points.append(saved)
-                observations, actions, rewards, dones, pulse_frames = [], [], [], [], []
+                observations, actions, rewards, dones, pulse_frames, native_frames = [], [], [], [], [], []
                 in_dead_time = True
 
             if harvest_dir is not None and recording_started:
@@ -316,7 +367,8 @@ def run(args: argparse.Namespace) -> int:
                     point_name = match_dir / f"point_{p['point_index']:04d}.npz"
                     save_point(point_name, p["observations"], p["actions"], p["rewards"], p["dones"],
                                level=cfg.mesen.game_level, outcome=match_outcome, match_id=match_id,
-                               point_index=p["point_index"], metadata=metadata, pulse_frames=p.get("pulse_frames"))
+                               point_index=p["point_index"], metadata=metadata, pulse_frames=p.get("pulse_frames"),
+                               native_frames=p.get("native_frames"))
                 summary = {**metadata_base, "match_id": match_id, "serve_mode": serve_mode,
                            "recorded_game_number": record_game_number, "recorded_game_outcome": match_outcome,
                            "player_games_at_end": p_games, "opponent_games_at_end": o_games,
@@ -349,6 +401,7 @@ def run(args: argparse.Namespace) -> int:
                         p["observations"], p["actions"], p["rewards"], p["dones"],
                         level=cfg.mesen.game_level, outcome=match_outcome, match_id=match_id,
                         point_index=p["point_index"], metadata=metadata, pulse_frames=p.get("pulse_frames"),
+                        native_frames=p.get("native_frames"),
                     )
                 summary = {
                     **metadata_base,
@@ -389,6 +442,8 @@ def main() -> None:
                         help="A snapshot within this many steps of the point's end counts as 'late'.")
     parser.add_argument("--serve", choices=("serve-first", "receive-first"), default="serve-first",
                         help="Record with player serving first, or skip Game 1 and record Game 2 while receiving first.")
+    parser.add_argument("--frame-skip", type=int, default=None,
+                        help="Raw NES frames per recorded observation. Default: config value. Match this value in train/evaluation config.")
     parser.add_argument("--scenario-tag", default="", help="Optional human-readable scenario label written into each point's metadata.")
     raise SystemExit(run(parser.parse_args()))
 

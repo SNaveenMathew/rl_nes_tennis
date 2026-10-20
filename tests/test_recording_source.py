@@ -44,3 +44,16 @@ def test_record_powershell_exposes_serve_mode():
     text = Path("scripts/record.ps1").read_text(encoding="utf-8")
     assert '[ValidateSet("serve-first", "receive-first")]' in text
     assert '--serve $Serve' in text
+
+
+def test_native_rgb_capture_is_record_mode_only_and_stored_separately():
+    bridge = Path("mesen/bridge.lua").read_text(encoding="utf-8")
+    client = Path("tennis_rl/mesen_client.py").read_text(encoding="utf-8")
+    recorder = Path("tennis_rl/record.py").read_text(encoding="utf-8")
+    assert 'MESEN_RL_CAPTURE_NATIVE' in bridge
+    assert 'local CAPTURE_NATIVE_FRAMES = RECORD_MODE and' in bridge
+    assert 'local function capture_frame_rgb()' in bridge
+    assert 'header .. frame .. native_frame' in bridge
+    assert 'native_frame = np.frombuffer(payload[gray_bytes:]' in client
+    assert '"native_frames"' in recorder
+    assert 'native_frames=p.get("native_frames")' in recorder

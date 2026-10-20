@@ -1,6 +1,7 @@
 # Runtime dependencies for Windows + Mesen 2 and local RL training.
 # Install the CUDA-specific PyTorch build appropriate for the workstation if needed.
 numpy>=2.0
+Pillow>=10.0
 psutil>=5.9
 torch>=2.6
 tensorboard>=2.14
