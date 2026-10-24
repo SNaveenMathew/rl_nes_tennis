@@ -19,7 +19,7 @@ from .inference_compat import validate_checkpoint_runtime
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/scenario.json")
-    parser.add_argument("--checkpoint", default="checkpoints_hierarchical_native128x120/hierarchical_latest.pt")
+    parser.add_argument("--checkpoint", default="checkpoints_hierarchical_native256x240_frame1/hierarchical_latest.pt")
     parser.add_argument("--episodes", type=int, default=20)
     parser.add_argument("--level", type=int, default=None, choices=range(1, 6), metavar="{1-5}",
                         help="CPU difficulty level (1-5, default from config).")
@@ -61,6 +61,7 @@ def main() -> None:
             run_id=run_id,
             lockstep=cfg.mesen.lockstep,
             lockstep_timeout_s=cfg.mesen.lockstep_timeout_s,
+            strict_lockstep=True,
         )
         for i in range(min(cfg.mesen.workers, args.episodes))
     ]

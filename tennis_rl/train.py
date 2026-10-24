@@ -54,7 +54,7 @@ def seed_everything(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def build_workers(cfg):
+def build_workers(cfg, *, strict_lockstep: bool = False):
     run_id = f"run_{time.strftime('%Y%m%d_%H%M%S')}_{random.getrandbits(40):010x}"
     return [
         MesenWorker(
@@ -81,6 +81,7 @@ def build_workers(cfg):
             capture_stderr=cfg.mesen.capture_stderr,
             lockstep=cfg.mesen.lockstep,
             lockstep_timeout_s=cfg.mesen.lockstep_timeout_s,
+            strict_lockstep=strict_lockstep,
         )
         for i in range(cfg.mesen.workers)
     ]

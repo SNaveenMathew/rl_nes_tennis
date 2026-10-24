@@ -330,7 +330,7 @@ class TaskAnnotationDataset:
         elif self.state_annotations:
             sample_shape = tuple(self.state_annotations[0].observation.shape)
         else:
-            sample_shape = (4, 120, 128)
+            sample_shape = (4, 240, 256)
         empty_obs = lambda: torch.empty((0, *sample_shape), dtype=torch.uint8)
         batch: dict[str, torch.Tensor] = {
             "demo_obs": torch.from_numpy(np.stack(expert_obs).astype(np.uint8, copy=False)) if expert_obs else empty_obs(),

@@ -162,7 +162,7 @@ def run_checks() -> bool:
 
     # 6. Checkpoint & Log directories
     print("\n[6/6] Checking Directory Write Permissions...")
-    dirs_to_check = [Path("checkpoints_native128x120"), Path("runs_native128x120"), Path("checkpoints_hierarchical_native128x120"), Path("runs_hierarchical_native128x120"), Path("runs/mesen_ipc")]
+    dirs_to_check = [Path("checkpoints_native256x240_frame1"), Path("runs_native256x240_frame1"), Path("checkpoints_hierarchical_native256x240_frame1"), Path("runs_hierarchical_native256x240_frame1"), Path("runs/mesen_ipc")]
     for d in dirs_to_check:
         d.mkdir(parents=True, exist_ok=True)
         test_file = d / ".write_test"

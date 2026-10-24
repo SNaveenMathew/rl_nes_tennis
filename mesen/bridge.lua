@@ -35,9 +35,9 @@ local function normalize_file_path(path)
     -- Keep the drive/UNC prefix intact while standardizing separators.
     return tostring(path or ""):gsub("\\", "/")
 end
-local WIDTH = tonumber(os.getenv("MESEN_RL_W") or "128")
-local HEIGHT = tonumber(os.getenv("MESEN_RL_H") or "120")
-local FRAME_SKIP = tonumber(os.getenv("MESEN_RL_FRAME_SKIP") or "2")
+local WIDTH = tonumber(os.getenv("MESEN_RL_W") or "256")
+local HEIGHT = tonumber(os.getenv("MESEN_RL_H") or "240")
+local FRAME_SKIP = tonumber(os.getenv("MESEN_RL_FRAME_SKIP") or "1")
 local GAME_LEVEL = math.max(1, math.min(5, math.floor(tonumber(os.getenv("MESEN_RL_LEVEL") or "1") or 1)))
 local RECORD_MODE = os.getenv("MESEN_RL_RECORD_MODE") == "1"
 -- Expensive native RGB capture is enabled only for human demonstration recording.
@@ -49,11 +49,11 @@ local AUTO_BOOT = os.getenv("MESEN_RL_AUTO_BOOT") ~= "0"
 -- Mesen aborts any script callback that runs longer than its script timeout (1000 ms
 -- by default, not raisable from the command line), so the wait is done in short
 -- slices: after MESEN_RL_LOCKSTEP_SLICE seconds the callback returns and the game
--- advances ONE frame with no input, then waits again. A slow learner update (seconds)
--- therefore costs a handful of idle frames instead of killing the bridge.
+-- advances ONE neutral frame, then waits again. A slow learner update (seconds)
+-- therefore costs a handful of neutral frames instead of killing the bridge.
 -- Off in record mode: the human has to keep playing in real time.
 local LOCKSTEP = (os.getenv("MESEN_RL_LOCKSTEP") ~= "0") and not RECORD_MODE
-local LOCKSTEP_SLICE_S = tonumber(os.getenv("MESEN_RL_LOCKSTEP_SLICE") or "0.25")
+local LOCKSTEP_SLICE_S = tonumber(os.getenv("MESEN_RL_LOCKSTEP_SLICE") or "0.70")
 -- An orphaned emulator (host crashed) stops itself after this many silent seconds.
 local LOCKSTEP_TIMEOUT_S = tonumber(os.getenv("MESEN_RL_LOCKSTEP_TIMEOUT") or "600")
 -- Strict lockstep is for deterministic replay/evaluation. Unlike normal training,
@@ -199,6 +199,25 @@ end
 
 local function report_error(text)
     pcall(function() write_text(ERROR_PATH, text .. "\n") end)
+end
+
+-- Publish acknowledgement sentinels only after the complete marker has been
+-- written and its handle closed. Direct write_text() makes the final path
+-- visible immediately after io.open(), which lets Windows hosts observe the
+-- file and then fail to unlink it while Lua is still writing/closing it.
+-- Use a same-directory temp file and rename so consumers only see a complete,
+-- closed marker. This matters for state save/load handshakes on Windows.
+local function write_ack(path, text)
+    local tmp = path .. ".tmp"
+    local called, ok = pcall(function()
+        return atomic_write(path, tmp, text)
+    end)
+    if not called or not ok then
+        local detail = called and "atomic publish returned false" or tostring(ok)
+        report_error("Failed to publish IPC acknowledgement " .. path .. ": " .. detail)
+        return false
+    end
+    return true
 end
 
 local function clear_buttons()
@@ -641,12 +660,19 @@ local input_callback = emu.addEventCallback(function()
     if RECORD_MODE and boot_complete then
         local input = emu.getInput(0)
         human_action = button_action_index(input)
-        -- Record the last non-neutral controller command observed during the
-        -- FRAME_SKIP interval. This preserves short A/B taps that may have
-        -- been released before the observation boundary.
-        if human_action ~= 0 then
+        -- FRAME_SKIP=1 is the frame-perfect data contract: one inputPolled event
+        -- is exactly one policy action interval, so record neutral frames too.
+        -- For legacy larger skips, keep the last non-neutral action in the interval.
+        if FRAME_SKIP == 1 then
+            interval_action = human_action
+        elseif human_action ~= 0 then
             interval_action = human_action
         end
+        -- These counters measure how many raw NES frames each shot button was
+        -- actually down during this observation interval. Previously they were
+        -- initialized/reset but never incremented, making all duration labels 0.
+        if input.a == true then interval_a_frames = interval_a_frames + 1 end
+        if input.b == true then interval_b_frames = interval_b_frames + 1 end
     else
         -- During automatic boot, even record mode must drive the menu. Once the
         -- match is ready, record mode stops overriding player-1 input and the
@@ -674,6 +700,10 @@ local function reset_tracking()
     last_frame_player_score = -1
     last_frame_opponent_score = -1
     stall_rescue_count = 0
+    human_action = 0
+    interval_action = 0
+    interval_a_frames = 0
+    interval_b_frames = 0
     for k, _ in pairs(held_buttons) do held_buttons[k] = 0 end
 end
 
@@ -733,7 +763,7 @@ local function perform_state_op_in_exec()
     if op.kind == "save" then
         local ok, err = pcall(function() saved_state = create_state() end)
         if ok and saved_state ~= nil then
-            write_text(IPC_DIR .. "/state_saved.txt", "SAVED\n")
+            write_ack(IPC_DIR .. "/state_saved.txt", "SAVED\n")
         else
             report_error("Failed to create savestate: " .. tostring(err))
         end
@@ -744,7 +774,7 @@ local function perform_state_op_in_exec()
         else
             local wrote, werr = write_binary(op.path, data)
             if wrote then
-                write_text(IPC_DIR .. "/state_saved.txt", "SAVED\n")
+                write_ack(IPC_DIR .. "/state_saved.txt", "SAVED\n")
             else
                 report_error("Could not write savestate file " .. tostring(op.path) .. ": " .. tostring(werr))
             end
@@ -768,7 +798,7 @@ local function perform_state_op_in_exec()
                 noop_remaining = math.max(0, math.floor(op.noop or 0))
                 noop_ack_pending = true
             else
-                write_text(IPC_DIR .. "/state_loaded.txt", "LOADED\n")
+                write_ack(IPC_DIR .. "/state_loaded.txt", "LOADED\n")
             end
         elseif data ~= nil then
             report_error("Failed to load savestate (" .. op.kind .. "): " .. tostring(loaded))
@@ -969,7 +999,14 @@ local function lockstep_wait()
                         emu.stop(36)
                         return false
                     end
-                    return true  -- soft-lockstep yields one frame to avoid timing out learner updates
+                    -- The requested action interval is over. Do not let its movement
+                    -- or shot button remain held during a host-side pause (e.g. PPO update).
+                    -- This soft mode still advances a neutral frame; evaluation uses strict
+                    -- lockstep and fails closed instead of allowing any silent timing drift.
+                    current_action = 0
+                    current_pulse_remaining = 0
+                    current_pulse_frames = 1
+                    return true
                 end
             end
         end
@@ -1061,7 +1098,7 @@ local end_callback = emu.addEventCallback(function()
         -- as part of a newly received action or HOLD duration.
         if noop_remaining == 0 and noop_ack_pending then
             noop_ack_pending = false
-            write_text(IPC_DIR .. "/state_loaded.txt", "LOADED\n")
+            write_ack(IPC_DIR .. "/state_loaded.txt", "LOADED\n")
             if LOCKSTEP then
                 local wait_ok = lockstep_wait()
                 if not wait_ok or stopped then return end

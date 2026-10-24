@@ -37,7 +37,7 @@ from .inference_compat import validate_checkpoint_runtime
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--config", default="configs/scenario.json")
-    parser.add_argument("--checkpoint", default="checkpoints_hierarchical_native128x120/hierarchical_latest.pt")
+    parser.add_argument("--checkpoint", default="checkpoints_hierarchical_native256x240_frame1/hierarchical_latest.pt")
     parser.add_argument("--episodes", type=int, default=3)
     parser.add_argument("--sample", action="store_true", help="Sample actions instead of taking the argmax (deterministic).")
     parser.add_argument("--level", type=int, default=1, choices=range(1, 6), metavar="{1-5}",
@@ -78,6 +78,7 @@ def main() -> None:
         headless=False,  # real, visible Mesen window
         lockstep=cfg.mesen.lockstep,
         lockstep_timeout_s=cfg.mesen.lockstep_timeout_s,
+        strict_lockstep=True,
     )
     env = ParallelTennis([worker], cfg.environment.stack_size, cfg.environment.episode_max_steps)
 

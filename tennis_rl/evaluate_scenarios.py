@@ -60,7 +60,7 @@ def main() -> int:
     parser.add_argument("--max-scenarios", type=int, default=0, help="0 means all compatible states")
     parser.add_argument("--skill", choices=["auto"] + list(__import__("tennis_rl.hierarchy_schema", fromlist=["DEFAULT_LEAF_TASKS"]).DEFAULT_LEAF_TASKS), default="auto",
                         help="Force one trained expert; use auto to evaluate learned gates")
-    parser.add_argument("--out", default="runs_hierarchical_native128x120/evaluation.jsonl")
+    parser.add_argument("--out", default="runs_hierarchical_native256x240_frame1/evaluation.jsonl")
     parser.add_argument("--summary", default="")
     parser.add_argument("--device", default=None)
     parser.add_argument("--seed", type=int, default=42)
@@ -111,7 +111,7 @@ def main() -> int:
                           stratum=rec.cell_id, phase=rec.phase,
                           state=rec, noop_frames=args.noop_frames)
 
-    workers = build_workers(cfg)
+    workers = build_workers(cfg, strict_lockstep=True)
     env = ParallelTennis(workers, stack_size=cfg.environment.stack_size,
         max_steps=args.point_max_steps, point_episodes=True,
         point_max_steps=args.point_max_steps, scenario_provider=provider,

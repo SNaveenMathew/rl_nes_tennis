@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from .actions import ACTIONS, ACTION_NAMES, encode_action
-from .config import load_config
+from .config import load_config, validate_frame_perfect_config
 from .mesen_client import BridgeError, MesenWorker
 from .scenarios import StateRecord, advance_score, cell_id, split_for_match
 
@@ -112,6 +112,9 @@ def run(args: argparse.Namespace) -> int:
         if int(args.frame_skip) < 1:
             raise ValueError("--frame-skip must be a positive number of raw NES frames")
         cfg.mesen.frame_skip = int(args.frame_skip)
+    # CLI overrides must not quietly invalidate the one-input-per-raw-frame
+    # demonstration contract enforced by the standard configs.
+    validate_frame_perfect_config(cfg, context="recording options")
     output_root = Path(args.output)
     match_id = time.strftime("%Y%m%d-%H%M%S") + f"-{os.getpid()}-{random.getrandbits(24):06x}"
     worker = MesenWorker(

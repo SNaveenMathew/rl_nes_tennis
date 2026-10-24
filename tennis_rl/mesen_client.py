@@ -51,7 +51,18 @@ class MesenWorker:
         lockstep: bool = True,
         lockstep_timeout_s: float = 600.0,
         capture_native_frames: bool = False,
+        strict_lockstep: bool = False,
+        strict_lockstep_wait_s: float = 0.70,
     ) -> None:
+        # This controller is configured for one policy decision per raw NES frame
+        # at the full native raster. Fail before launching Mesen if any caller
+        # attempts to silently skip frames or shrink the policy image.
+        runtime_contract = (int(width), int(height), int(frame_skip))
+        if runtime_contract != (256, 240, 1):
+            raise ValueError(
+                "Frame-perfect MesenWorker requires width=256, height=240, frame_skip=1; "
+                f"got width={width}, height={height}, frame_skip={frame_skip}."
+            )
         # host/port are retained for config backward compatibility; transport is
         # now local filesystem IPC and never opens a TCP socket.
         _ = host, port
@@ -86,6 +97,8 @@ class MesenWorker:
         # Never used while a human is playing (record mode).
         self.lockstep = bool(lockstep) and not self.record_mode
         self.lockstep_timeout_s = float(lockstep_timeout_s)
+        self.strict_lockstep = bool(strict_lockstep) and self.lockstep
+        self.strict_lockstep_wait_s = min(0.85, max(0.10, float(strict_lockstep_wait_s)))
 
         base = Path(ipc_dir or (Path("runs") / "mesen_ipc"))
         # Never reuse a mailbox directory across launches. This prevents stale
@@ -164,6 +177,11 @@ class MesenWorker:
             "MESEN_RL_RECORD_MODE": "1" if self.record_mode else "0",
             "MESEN_RL_CAPTURE_NATIVE": "1" if self.capture_native_frames else "0",
             "MESEN_RL_LOCKSTEP": "1" if self.lockstep else "0",
+            # Keep the soft training fallback inside the emulator callback watchdog.
+            # In deterministic evaluation, strict mode fails instead of silently advancing.
+            "MESEN_RL_LOCKSTEP_SLICE": "0.70",
+            "MESEN_RL_STRICT_LOCKSTEP": "1" if self.strict_lockstep else "0",
+            "MESEN_RL_STRICT_WAIT_S": str(self.strict_lockstep_wait_s),
             "MESEN_RL_LOCKSTEP_TIMEOUT": str(int(self.lockstep_timeout_s)),
         })
 

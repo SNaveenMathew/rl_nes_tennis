@@ -50,8 +50,8 @@
     "button_choices": ["NONE", "A", "B"],
     "factorization": "P(movement|belief,task) * P(button|belief,task,movement)",
     "timing": {
-      "movement_durations_decisions": [1, 2, 4, 8],
-      "button_press_duration": "separate_pulse_or_hold_head",
+      "movement_durations_decisions": [1],
+      "button_press_duration": "one_raw_NES_frame_per_decision; repeat action on later frame to keep held",
       "termination": "learned_continue_or_return_to_manager"
     }
   },
