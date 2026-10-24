@@ -1,0 +1,5 @@
+# Install the project requirements first, then these UI-only dependencies:
+#   pip install -r requirements.txt
+#   pip install -r app/requirements.txt
+streamlit>=1.40
+imageio-ffmpeg>=0.5.1
