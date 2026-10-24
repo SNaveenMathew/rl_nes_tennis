@@ -12,6 +12,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -136,9 +137,31 @@ def load_point_bundle(point_path: str | Path, mtime_ns: int, size: int) -> dict[
     return {"frames": frames, "has_native": native, "actions": actions, "pulses": pulses, "length": length}
 
 
+def resolve_ffmpeg_executable() -> str:
+    """Resolve bundled imageio-ffmpeg first, then a system ffmpeg installation.
+
+    The app requirements include imageio-ffmpeg. A system ffmpeg executable is
+    accepted as a fallback so a missing Python package does not block video
+    review when ffmpeg is already installed.
+    """
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except (ModuleNotFoundError, ImportError, RuntimeError) as exc:
+        system_ffmpeg = shutil.which("ffmpeg")
+        if system_ffmpeg:
+            return system_ffmpeg
+        raise RuntimeError(
+            "MP4 preview needs the imageio-ffmpeg package or a system ffmpeg executable. "
+            "Install it into the same Python environment used by Streamlit with "
+            "`python -m pip install imageio-ffmpeg` (or `python -m pip install -r app/requirements.txt`), "
+            "then start the app with `python -m streamlit run app/annotation_app.py`. "
+            f"Original import/encoder error: {exc}"
+        ) from exc
+
+
 def ensure_video(point: dict[str, Any], frames: np.ndarray, frame_skip: int) -> Path:
     """Encode the point's recorded frames as a real, seekable MP4 for browser playback."""
-    import imageio_ffmpeg
 
     CACHE_ROOT.joinpath("videos").mkdir(parents=True, exist_ok=True)
     cache_key = hashlib.sha256(
@@ -156,7 +179,7 @@ def ensure_video(point: dict[str, Any], frames: np.ndarray, frame_skip: int) -> 
         raise ValueError(f"Unsupported frame array shape {frames.shape}")
     # The emulator canvas is 256x240; both dimensions are even. Legacy grayscale
     # frames are replicated to RGB only for video encoding, never for training.
-    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    ffmpeg = resolve_ffmpeg_executable()
     fps = 60.1 / max(1, int(frame_skip))
     temp_path = target.with_suffix(".building.mp4")
     cmd = [
@@ -192,6 +215,77 @@ def ensure_video(point: dict[str, Any], frames: np.ndarray, frame_skip: int) -> 
             pass
         raise
     return target
+
+
+def _is_blank_cell(value: Any) -> bool:
+    """Treat Streamlit/Pandas empty cells as blank without importing Pandas here."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, (float, np.floating)):
+        return bool(np.isnan(value))
+    return False
+
+
+def _editor_integer(value: Any) -> int | None:
+    if _is_blank_cell(value):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not np.isfinite(number) or not number.is_integer():
+        return None
+    return int(number)
+
+
+def task_rows_signature(rows: list[dict[str, Any]], default_annotator: str = "") -> tuple | None:
+    """Return a stable content signature, or None while a nonblank row is incomplete.
+
+    IDs are deliberately excluded so an unpersisted added row compares equal to
+    its SQLite-backed version after insertion. Blank data-editor placeholder rows
+    are ignored. This is used to auto-save completed edits without creating an
+    infinite Streamlit rerun loop.
+    """
+    normalized: list[tuple] = []
+    for row in rows:
+        start_raw, end_raw, skill_raw = row.get("start"), row.get("end"), row.get("skill")
+        if all(_is_blank_cell(value) for value in (start_raw, end_raw, skill_raw)):
+            continue
+        start, end = _editor_integer(start_raw), _editor_integer(end_raw)
+        skill = str(skill_raw or "").strip()
+        if start is None or end is None or not skill or skill not in LABEL_OPTIONS:
+            return None
+
+        duration_raw = row.get("manager_duration")
+        duration = None if _is_blank_cell(duration_raw) else _editor_integer(duration_raw)
+        if not _is_blank_cell(duration_raw) and duration not in (1, 2, 4, 8):
+            return None
+        confidence_raw = row.get("confidence")
+        try:
+            confidence = 1.0 if _is_blank_cell(confidence_raw) else float(confidence_raw)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not np.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+            return None
+
+        # New rows receive the active annotator on save; existing rows preserve
+        # their current annotator, including an intentionally blank value.
+        row_id = _editor_integer(row.get("id"))
+        annotator = str(row.get("annotator") or (default_annotator if row_id is None else ""))
+        notes = str(row.get("notes") or "")
+        normalized.append((start, end, skill, duration, round(confidence, 8), annotator, notes))
+    return tuple(sorted(normalized, key=lambda item: (item[0], item[1], item[2], repr(item[3:]))))
+
+
+def save_task_draft(store: AnnotationStore, demo_root: str | Path, point_path: str,
+                    rows: list[dict[str, Any]], point_length: int,
+                    annotator: str = "") -> tuple[int, list[dict[str, Any]]]:
+    """Persist one task draft and return canonical DB rows with stable IDs."""
+    count = store.save_point_annotations(demo_root, point_path, rows, point_length,
+                                         default_annotator=annotator)
+    return count, task_editor_rows(store.annotations_for_point(demo_root, point_path))
 
 
 def task_editor_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -339,9 +433,35 @@ def main() -> None:
     selected_label = st.selectbox("Point queue", list(path_by_label), index=default_index, key="point_queue_select")
     point = path_by_label[selected_label]
     rel_path = point["rel"]
-    if st.session_state.get("active_point_path") != rel_path:
+    scope_key = str(demo_root.resolve())
+    point_identity = f"{scope_key}::{rel_path}"
+    active_identity = st.session_state.get("active_point_identity")
+    draft_map = st.session_state.setdefault("draft_task_rows_by_point", {})
+
+    if active_identity != point_identity:
+        # Preserve a partial/invalid editor draft when the annotator switches
+        # points. Valid drafts are auto-saved at the end of every edit-triggered
+        # run, but incomplete rows cannot yet be committed to SQLite.
+        old_root = st.session_state.get("active_demo_root")
+        old_rel = st.session_state.get("active_point_path")
+        old_rows = st.session_state.get("draft_task_rows")
+        if old_root and old_rel and isinstance(old_rows, list):
+            old_persisted = store.annotations_for_point(old_root, old_rel)
+            old_draft_sig = task_rows_signature(old_rows, annotator)
+            old_saved_sig = task_rows_signature(old_persisted)
+            old_identity = st.session_state.get("active_point_identity")
+            if old_identity and (old_draft_sig is None or old_draft_sig != old_saved_sig):
+                draft_map[old_identity] = old_rows
+            elif old_identity:
+                draft_map.pop(old_identity, None)
+
         st.session_state["active_point_path"] = rel_path
-        st.session_state["draft_task_rows"] = task_editor_rows(store.annotations_for_point(demo_root, rel_path))
+        st.session_state["active_demo_root"] = scope_key
+        st.session_state["active_point_identity"] = point_identity
+        if point_identity in draft_map:
+            st.session_state["draft_task_rows"] = draft_map[point_identity]
+        else:
+            st.session_state["draft_task_rows"] = task_editor_rows(store.annotations_for_point(demo_root, rel_path))
         st.session_state["draft_state_rows"] = state_editor_rows(store.state_for_point(demo_root, rel_path))
         st.session_state["editor_revision"] = int(st.session_state.get("editor_revision", 0)) + 1
         st.session_state["state_editor_revision"] = int(st.session_state.get("state_editor_revision", 0)) + 1
@@ -360,7 +480,7 @@ def main() -> None:
             video_path = ensure_video(point, bundle["frames"], frame_skip)
     except Exception as exc:
         st.error(f"Could not prepare this point's video: {exc}")
-        st.info("Install app dependencies with `pip install -r app/requirements.txt` and check that the NPZ is readable.")
+        st.info("If the error mentions ffmpeg/imageio_ffmpeg, run `python -m pip install -r app/requirements.txt` in this same environment, then relaunch with `python -m streamlit run app/annotation_app.py`. A system ffmpeg executable can also be used as a fallback.")
         st.stop()
 
     st.subheader("Recorded point")
@@ -455,19 +575,36 @@ Use half-open `[start, end)` ranges. Do not overlap task windows. Leave uncertai
     buttons = st.columns([1, 1, 1.6])
     with buttons[0]:
         if st.button("＋ Add segment", key=f"add_seg_{hashlib.md5(rel_path.encode()).hexdigest()}"):
-            draft = st.session_state["draft_task_rows"]
+            draft = list(st.session_state["draft_task_rows"])
             draft.append({"id": None, "start": int(new_start), "end": int(new_end), "skill": new_label,
                           "manager_duration": None, "confidence": 1.0, "annotator": annotator, "notes": ""})
-            st.session_state["draft_task_rows"] = draft
-            st.session_state["editor_revision"] += 1
+            try:
+                count, refreshed_rows = save_task_draft(store, demo_root, rel_path, draft,
+                                                        bundle["length"], annotator)
+                st.session_state["draft_task_rows"] = refreshed_rows
+                st.session_state["draft_task_rows_by_point"].pop(point_identity, None)
+                st.session_state["editor_revision"] += 1
+                st.session_state["flash_message"] = f"Saved {count} task segments for {rel_path}."
+                st.session_state.pop("flash_error", None)
+            except (ValueError, sqlite3.Error) as exc:
+                # Keep the added row visible so the annotator can correct a
+                # bad/overlapping interval rather than losing it on rerun.
+                st.session_state["draft_task_rows"] = draft
+                st.session_state["draft_task_rows_by_point"][point_identity] = draft
+                st.session_state["editor_revision"] += 1
+                st.session_state["flash_error"] = f"Segment not saved: {exc}"
             st.rerun()
     with buttons[1]:
         if st.button("Save edits", type="primary", key=f"save_seg_{hashlib.md5(rel_path.encode()).hexdigest()}"):
             try:
-                count = store.save_point_annotations(demo_root, rel_path, st.session_state["draft_task_rows"], bundle["length"], default_annotator=annotator)
-                st.session_state["draft_task_rows"] = task_editor_rows(store.annotations_for_point(demo_root, rel_path))
+                count, refreshed_rows = save_task_draft(store, demo_root, rel_path,
+                                                        st.session_state["draft_task_rows"],
+                                                        bundle["length"], annotator)
+                st.session_state["draft_task_rows"] = refreshed_rows
+                st.session_state["draft_task_rows_by_point"].pop(point_identity, None)
                 st.session_state["editor_revision"] += 1
                 st.session_state["flash_message"] = f"Saved {count} task segments for {rel_path}."
+                st.session_state.pop("flash_error", None)
                 st.rerun()
             except (ValueError, sqlite3.Error) as exc:
                 st.error(f"Not saved: {exc}")
@@ -494,6 +631,8 @@ Use half-open `[start, end)` ranges. Do not overlap task windows. Leave uncertai
             st.error(str(exc))
     if "flash_message" in st.session_state:
         st.success(st.session_state.pop("flash_message"))
+    if "flash_error" in st.session_state:
+        st.error(st.session_state.pop("flash_error"))
 
     with st.expander("Optional per-frame state / event labels (editable)", expanded=False):
         st.caption("State labels are stored separately from task intervals. Coordinates are normalized x,y in [0,1]; events_json is an object such as {\"agent_contact_window\": 1}. Blank means unknown, not no.")
@@ -542,6 +681,33 @@ Use half-open `[start, end)` ranges. Do not overlap task windows. Leave uncertai
             st.dataframe(pd.DataFrame(events), use_container_width=True, hide_index=True)
         else:
             st.caption("No changes recorded yet. Adds, edits, deletes, imports, and review status changes are audited in SQLite.")
+
+    # The task table is now auto-saved whenever a complete, valid draft differs
+    # from SQLite. This prevents new rows and label edits being lost when an
+    # annotator navigates to another point without clicking Save edits. Invalid
+    # or incomplete rows remain as a per-point draft and produce a visible notice.
+    task_draft = st.session_state.get("draft_task_rows", [])
+    task_signature = task_rows_signature(task_draft, annotator)
+    saved_task_rows = store.annotations_for_point(demo_root, rel_path)
+    saved_signature = task_rows_signature(saved_task_rows)
+    if task_signature is None:
+        st.warning("Task edits are not saved yet: complete each nonblank row and use valid integer boundaries/labels. The draft is preserved if you switch points.")
+    elif task_signature != saved_signature:
+        try:
+            count, refreshed_rows = save_task_draft(store, demo_root, rel_path, task_draft,
+                                                    bundle["length"], annotator)
+        except (ValueError, sqlite3.Error) as exc:
+            st.warning(f"Task edits are still a draft and were not written to the database: {exc}. Correct the interval or click Save edits after fixing it.")
+            st.session_state["draft_task_rows_by_point"][point_identity] = task_draft
+        else:
+            st.session_state["draft_task_rows"] = refreshed_rows
+            st.session_state["draft_task_rows_by_point"].pop(point_identity, None)
+            st.session_state["editor_revision"] = int(st.session_state.get("editor_revision", 0)) + 1
+            st.session_state["flash_message"] = f"Auto-saved {count} task segments for {rel_path}."
+            st.session_state.pop("flash_error", None)
+            st.rerun()
+    else:
+        st.session_state["draft_task_rows_by_point"].pop(point_identity, None)
 
     st.divider()
     st.caption("Database is local to this repo under app/data. Export task labels before using the existing training pipeline; it reads demonstrations/task_annotations.jsonl, not SQLite directly.")
