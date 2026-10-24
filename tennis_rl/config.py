@@ -17,11 +17,11 @@ class MesenConfig:
     startup_timeout_s: float = 20.0
     socket_timeout_s: float = 30.0
     # Keep collection, training, evaluation, and inference on the same temporal/spatial contract.
-    frame_skip: int = 2
+    frame_skip: int = 1
     match_games: int = 6
     game_level: int = 1
-    observation_width: int = 128
-    observation_height: int = 120
+    observation_width: int = 256
+    observation_height: int = 240
     # Native RGB is stored only by the human demonstration recorder, never by RL workers.
     capture_native_frames: bool = True
     save_state_path: str = ""
@@ -86,8 +86,8 @@ class PPOConfig:
     amp: bool = True
     total_steps: int = 5_000_000
     checkpoint_every_updates: int = 25
-    save_dir: str = "checkpoints_native128x120"
-    tensorboard_dir: str = "runs_native128x120"
+    save_dir: str = "checkpoints_native256x240_frame1"
+    tensorboard_dir: str = "runs_native256x240_frame1"
     max_step_checkpoints: int = 3
 
     # Imitation is supplemental supervision; do not infer the correctness of an
@@ -151,10 +151,10 @@ class HierarchicalConfig:
         "hold_cover", "recover_reposition", "approach_net", "retreat_lob",
         "stroke_selector", "stroke_timing", "transition_wait_reposition",
     ])
-    durations: list[int] = field(default_factory=lambda: [1, 2, 4, 8])
+    durations: list[int] = field(default_factory=lambda: [1])
     # Shot button pulse durations are measured in raw NES frames and must be
     # <= mesen.frame_skip. The bridge preserves movement while pulsing A/B.
-    button_pulse_durations: list[int] = field(default_factory=lambda: [1, 2])
+    button_pulse_durations: list[int] = field(default_factory=lambda: [1])
     hidden_dim: int = 128
     rollout_steps: int = 256
     learning_rate: float = 1e-4
@@ -170,8 +170,8 @@ class HierarchicalConfig:
     epochs: int = 3
     checkpoint_every_updates: int = 10
     max_step_checkpoints: int = 3
-    save_dir: str = "checkpoints_hierarchical_native128x120"
-    log_dir: str = "runs_hierarchical_native128x120"
+    save_dir: str = "checkpoints_hierarchical_native256x240_frame1"
+    log_dir: str = "runs_hierarchical_native256x240_frame1"
     # Inference and training are never allowed to apply heuristic task routing.
     # This flag only enables supervised manager targets from explicit scenario
     # metadata (e.g. the ROM's known server/receiver role at point start).
@@ -258,8 +258,50 @@ def _merge_dataclass(dc: Any, values: dict[str, Any]) -> Any:
     return dc
 
 
+FRAME_PERFECT_WIDTH = 256
+FRAME_PERFECT_HEIGHT = 240
+FRAME_PERFECT_SKIP = 1
+
+
+def validate_frame_perfect_config(cfg: Config, *, context: str = "configuration") -> None:
+    """Reject any runtime contract that would discard spatial or temporal detail.
+
+    One policy step must represent exactly one raw NES frame, and the model input
+    must preserve the complete 256x240 raster. Hierarchical option and A/B pulse
+    durations must also be one frame so no action is committed for multiple frames.
+    """
+    actual = (
+        int(cfg.mesen.observation_width),
+        int(cfg.mesen.observation_height),
+        int(cfg.mesen.frame_skip),
+    )
+    expected = (FRAME_PERFECT_WIDTH, FRAME_PERFECT_HEIGHT, FRAME_PERFECT_SKIP)
+    problems: list[str] = []
+    if actual != expected:
+        problems.append(
+            f"expected observation_width/height/frame_skip={expected}, got {actual}"
+        )
+    hc = getattr(cfg, "hierarchical", None)
+    if hc is not None and bool(hc.enabled):
+        durations = tuple(int(x) for x in hc.durations)
+        pulse_durations = tuple(int(x) for x in hc.button_pulse_durations)
+        if durations != (1,):
+            problems.append(f"hierarchical.durations must be [1], got {list(durations)}")
+        if pulse_durations != (1,):
+            problems.append(
+                "hierarchical.button_pulse_durations must be [1], "
+                f"got {list(pulse_durations)}"
+            )
+    if problems:
+        raise ValueError(
+            f"{context} violates the frame-perfect contract: " + "; ".join(problems)
+            + ". Use full 256x240 observations, frame_skip=1, and one-frame actions/pulses."
+        )
+
+
 def load_config(path: str | Path) -> Config:
     root = Config()
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     _merge_dataclass(root, data)
+    validate_frame_perfect_config(root, context=f"config {path}")
     return root
