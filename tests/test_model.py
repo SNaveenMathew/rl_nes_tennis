@@ -65,11 +65,11 @@ def test_motion_target_and_auxiliary_head():
     assert motion_pred.shape == (5, 2, 2)
 
 
-def test_default_model_accepts_recommended_128x120_policy_input():
+def test_default_model_accepts_full_resolution_256x240_policy_input():
     import torch
     from tennis_rl.model import RecurrentActorCritic
     model = RecurrentActorCritic(4, 27, [8, 16, 16], 32, 24).eval()
-    obs = torch.zeros((2, 4, 120, 128), dtype=torch.uint8)
+    obs = torch.zeros((1, 4, 240, 256), dtype=torch.uint8)
     with torch.no_grad():
-        actions, *_ = model.act(obs, model.initial_hidden(2, torch.device("cpu")), deterministic=True)
-    assert actions.shape == (2,)
+        actions, *_ = model.act(obs, model.initial_hidden(1, torch.device("cpu")), deterministic=True)
+    assert actions.shape == (1,)

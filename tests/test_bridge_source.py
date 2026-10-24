@@ -96,11 +96,20 @@ def test_load_from_noop_completion_is_a_lockstep_frame_barrier():
     start = source.index("-- No-op frames after LOAD_FROM run free")
     end = source.index("-- Count down precise A/B pulses", start)
     block = source[start:end]
-    ack = block.index('write_text(IPC_DIR .. "/state_loaded.txt", "LOADED\\n")')
+    ack = block.index('write_ack(IPC_DIR .. "/state_loaded.txt", "LOADED\\n")')
     lockstep = block.index("if LOCKSTEP then", ack)
     wait = block.index("lockstep_wait()", lockstep)
     early_return = block.index("return", wait)
     assert ack < lockstep < wait < early_return
+
+
+def test_state_acknowledgements_are_atomically_published_for_windows():
+    """Hosts must not see an ack path while Lua still has the file open."""
+    source = Path("mesen/bridge.lua").read_text(encoding="utf-8")
+    assert "local function write_ack(path, text)" in source
+    assert "return atomic_write(path, tmp, text)" in source
+    assert 'write_ack(IPC_DIR .. "/state_saved.txt", "SAVED\\n")' in source
+    assert source.count('write_ack(IPC_DIR .. "/state_loaded.txt", "LOADED\\n")') == 2
 
 
 def test_strict_state_ops_harness_sends_q_after_final_observation():

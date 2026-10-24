@@ -6,7 +6,7 @@ from tennis_rl.config import Config
 from tennis_rl.inference_compat import validate_checkpoint_runtime
 
 
-def _saved_config(*, width=128, height=120, frame_skip=2, pulses=(1, 2)):
+def _saved_config(*, width=256, height=240, frame_skip=1, pulses=(1,)):
     return {
         "mesen": {
             "observation_width": width,
@@ -21,9 +21,9 @@ def test_hierarchical_checkpoint_runtime_matches_config():
     cfg = Config()
     payload = {
         "extra": {"config": _saved_config()},
-        "button_pulse_durations": [1, 2],
+        "button_pulse_durations": [1],
     }
-    assert validate_checkpoint_runtime(payload, cfg, hierarchical=True) == (1, 2)
+    assert validate_checkpoint_runtime(payload, cfg, hierarchical=True) == (1,)
 
 
 @pytest.mark.parametrize(

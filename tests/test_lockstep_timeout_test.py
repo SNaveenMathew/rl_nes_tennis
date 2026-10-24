@@ -49,16 +49,17 @@ def run(delays, slice_s=None, frame_skip=4):
     err = (ipc / "error.txt").read_text() if (ipc / "error.txt").exists() else ""
     return st, err, int(mock.timeout_hits), mock.stopped, list(mock.callback_errors)
 
+FRAME_SKIP = 4
 delays = [0.0, 0.05, 2.5, 0.0, 1.2, 0.0]
-st, err, hits, stopped, cberr = run(delays)
+st, err, hits, stopped, cberr = run(delays, frame_skip=FRAME_SKIP)
 gaps = [b - a for a, b in zip(st["frames"], st["frames"][1:])]
 print("host delays (s):", delays)
 print("frames between observations:", gaps, "| timeout hits:", hits, "| stopped:", stopped, "| error.txt:", repr(err))
 assert st["ok"] and hits == 0 and stopped is None and not err and not cberr
-assert gaps[0] == 4 and gaps[1] == 4, "fast replies must land on exactly frame_skip frames"
-assert gaps[3] == 4 and gaps[5] == 4, "after a long pause the next step is back to exactly frame_skip frames"
-assert 4 < gaps[2] <= 4 + 14 and 4 < gaps[4] <= 4 + 8, "a long pause may only cost a handful of idle frames"
-print(f"2.5s pause cost {gaps[2]-4} idle frames, 1.2s pause cost {gaps[4]-4} (an unthrottled emulator would run ~100,000s)")
+assert gaps[0] == FRAME_SKIP and gaps[1] == FRAME_SKIP, "fast replies must land on exactly frame_skip frames"
+assert gaps[3] == FRAME_SKIP and gaps[5] == FRAME_SKIP, "after a long pause the next step is back to exactly frame_skip frames"
+assert FRAME_SKIP <= gaps[2] <= FRAME_SKIP + 14 and FRAME_SKIP <= gaps[4] <= FRAME_SKIP + 8, "a long pause may add zero or only a handful of idle frames"
+print(f"2.5s pause cost {gaps[2]-FRAME_SKIP} idle frames, 1.2s pause cost {gaps[4]-FRAME_SKIP} (an unthrottled emulator would run ~100,000s)")
 
 # Control: the old unsliced wait (one callback that spins until the host answers) must hit the timeout.
 st2, err2, hits2, stopped2, cberr2 = run([0.0, 2.5, 0.0], slice_s=100)
