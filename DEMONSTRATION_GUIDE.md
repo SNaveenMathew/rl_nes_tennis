@@ -1,10 +1,10 @@
 # Fresh demonstration collection and training guide
 
-This guide defines the recommended end-to-end data contract for this repository. It assumes the supplied `configs/scenario.json`: **128×120 grayscale policy input**, original **256×240 RGB** frames stored separately for annotation, and **`frame_skip=2`** (about 30 policy decisions per second). Recording, training, evaluation, and deployment must use the same observation dimensions and frame skip.
+This guide defines the recommended end-to-end data contract for this repository. It assumes the supplied `configs/scenario.json`: **256×240 grayscale policy input** (full spatial resolution), original **256×240 RGB** frames stored separately for annotation, and **`frame_skip=1`** (one decision per raw NES frame, about 60.1 decisions per second). Recording, training, evaluation, and deployment must use the same observation dimensions and frame skip.
 
 ## 1. Clean start
 
-The new policy input shape changes model layer dimensions; old checkpoints are not compatible. The new default checkpoint and run directories are versioned with `native128x120` so they do not accidentally reuse the prior run outputs. Existing 84×84 demonstrations cannot be restored to higher resolution and should not be mixed into this fresh set.
+The new policy input shape changes model layer dimensions; old checkpoints are not compatible. The new default checkpoint and run directories are versioned with `native256x240_frame1` so they do not accidentally reuse the prior run outputs. Existing 84×84 or 128×120 demonstrations cannot be restored to full spatial resolution and should not be mixed into this fresh set; the old frame-skip contract is also different.
 
 From PowerShell at the repository root:
 
@@ -18,21 +18,21 @@ When prompted, enter exactly `RESET DEMONSTRATIONS`. This removes only known gen
 
 `configs/scenario.json` already sets:
 
-- policy image: 128×120 grayscale, four observations stacked;
+- policy image: 256×240 grayscale, four observations stacked;
 - annotation image: aligned 256×240 RGB `native_frames` saved in the same point NPZ;
-- temporal spacing: two raw NES frames per saved action/observation step;
+- temporal spacing: one raw NES frame per saved action/observation step;
 - new checkpoint/log locations that are separate from legacy runs.
 
 Run two separate recordings so both service roles are represented:
 
 ```powershell
-python -m tennis_rl.record --config configs/scenario.json --output demonstrations --level 1 --frame-skip 2 --serve serve-first --scenario-tag level1_serve_rally
-python -m tennis_rl.record --config configs/scenario.json --output demonstrations --level 1 --frame-skip 2 --serve receive-first --scenario-tag level1_receive_rally
+python -m tennis_rl.record --config configs/scenario.json --output demonstrations --level 1 --frame-skip 1 --serve serve-first --scenario-tag level1_serve_rally
+python -m tennis_rl.record --config configs/scenario.json --output demonstrations --level 1 --frame-skip 1 --serve receive-first --scenario-tag level1_receive_rally
 ```
 
 Play the game normally. `receive-first` uses Game 1 as a warm-up and begins recording in Game 2, when Player 1 receives. Close Mesen or press Ctrl+C to finish. Record multiple complete matches, varying rally situations and actions; press A/B intentionally so both shot inputs are represented. Use descriptive tags per level and role.
 
-You can run `scripts/record.ps1` instead; it defaults to `configs/scenario.json` and passes the same optional frame-skip/tag flags. Use `--frame-skip 1` only for a separate timing-focused set, and then train/evaluate with a config that also uses 1 (with button pulse durations `[1]`). Never mix frame skips in one training root.
+You can run `scripts/record.ps1` instead; it defaults to `configs/scenario.json` and passes the same optional frame-skip/tag flags. Use `--frame-skip 1` for every recording in this dataset and train/evaluate using the same config and one-frame button pulse durations `[1]`. The shipped frame-perfect config intentionally rejects other frame skips. Never mix legacy recordings or checkpoints with this dataset.
 
 ## 3. Audit before more recording
 
@@ -40,7 +40,7 @@ You can run `scripts/record.ps1` instead; it defaults to `configs/scenario.json`
 python -m tennis_rl.dataset stats --demo-root demonstrations
 ```
 
-Check `native_capture_coverage`, `stored_observation_resolution_counts_by_point`, `recorded_frame_skip_counts_by_point`, and `controller_action_counts`. For this configuration, new point files should report 128×120 observations, frame skip 2, native RGB capture coverage for every step, and A/B shot actions when you pressed those buttons. If native frames are missing or metadata disagrees, stop and fix the recorder before collecting more data.
+Check `native_capture_coverage`, `stored_observation_resolution_counts_by_point`, `recorded_frame_skip_counts_by_point`, and `controller_action_counts`. For this configuration, new point files should report 256×240 observations, frame skip 1, native RGB capture coverage for every step, and A/B shot actions when you pressed those buttons. If native frames are missing or metadata disagrees, stop and fix the recorder before collecting more data.
 
 ## 4. Review full-resolution frames
 
@@ -72,7 +72,7 @@ python -m tennis_rl.dataset extract --demo-root demonstrations --segment-length 
 python -m tennis_rl.dataset stats --demo-root demonstrations
 ```
 
-The split is by whole match to prevent overlapping segments from leaking between training and validation/holdout. Segment length and stride count saved steps: at `frame_skip=2`, a 16-step segment covers 32 raw NES frames, approximately 0.53 seconds.
+The split is by whole match to prevent overlapping segments from leaking between training and validation/holdout. Segment length and stride count saved steps: at `frame_skip=1`, a 16-step segment covers 16 raw NES frames, approximately 0.27 seconds.
 
 ## 7. Train and evaluate
 
@@ -89,6 +89,6 @@ python -m tennis_rl.train --config configs/scenario.json --algo ppo
 python -m tennis_rl.train --config configs/scenario.json --algo dqfd
 ```
 
-Training now fails early if the demonstration dimensions or recorded frame skip disagree with the active configuration. Use the same config for evaluation/inference, unless you intentionally create a separate config whose temporal and spatial settings match the training run. Do not point at legacy checkpoints; the updated config uses the `*_native128x120` output directories.
+Training now fails early if the demonstration dimensions or recorded frame skip disagree with the active configuration. Use the same config for evaluation/inference, unless you intentionally create a separate config whose temporal and spatial settings match the training run. Do not point at legacy checkpoints; the updated config uses the `*_native256x240_frame1` output directories.
 
 Unit tests can check serialization, annotations, data audits, and bridge protocol, but they cannot prove the real Mesen executable/ROM behave correctly on every system or that the learned agent will win. Verify a short visible recording, run the data audit, then evaluate several held-out full matches before treating the model as improved.

@@ -2,7 +2,7 @@
 
 ## Design
 
-The default algorithm is a learned hierarchy, not a rule-based state machine. A manager policy chooses one skill from `serve`, `receive`, `baseline`, `approach_net`, `recover`, `shot`, and `wait`, and also chooses a duration from `[1, 2, 4, 8]` environment decisions. The corresponding independent expert actor-critic head selects one of 27 movement/button combinations. The manager is sampled only at learned option boundaries. There is no hard-coded inference mapping from court/ball state to a skill.
+The default algorithm is a learned hierarchy, not a rule-based state machine. A manager policy chooses one skill from `serve`, `receive`, `baseline`, `approach_net`, `recover`, `shot`, and `wait`, and also chooses a duration from `[1]` environment decision in the frame-perfect configuration, so the manager is reconsidered every raw NES frame. The corresponding independent expert actor-critic head selects one of 27 movement/button combinations. The manager is sampled only at learned option boundaries. There is no hard-coded inference mapping from court/ball state to a skill.
 
 The visual encoder is shared to keep the model tractable; skill-specific policy/value heads remain separate. The manager and active expert have separate PPO loss streams. The 27-action model uses a joint action distribution with movement-shot interaction parameters rather than assuming movement and shot choice are independent.
 
@@ -49,10 +49,10 @@ Edit the local ROM and Mesen paths in `configs/scenario.json` first. Example sho
 python -m tennis_rl.train --config configs/scenario.json --algo hierarchical --max-updates 3
 ```
 
-Default hierarchy checkpoint paths are configured by `hierarchical.save_dir` and `hierarchical.log_dir` (defaults: `checkpoints_hierarchical_native128x120`, `runs_hierarchical_native128x120`). Evaluate a hierarchy checkpoint with:
+Default hierarchy checkpoint paths are configured by `hierarchical.save_dir` and `hierarchical.log_dir` (defaults: `checkpoints_hierarchical_native256x240_frame1`, `runs_hierarchical_native256x240_frame1`). Evaluate a hierarchy checkpoint with:
 
 ```powershell
-python -m tennis_rl.evaluate --config configs/scenario.json --checkpoint checkpoints_hierarchical_native128x120/hierarchical_latest.pt --episodes 20
+python -m tennis_rl.evaluate --config configs/scenario.json --checkpoint checkpoints_hierarchical_native256x240_frame1/hierarchical_latest.pt --episodes 20
 ```
 
 For a software-only sanity test without Mesen/ROM:

@@ -5,11 +5,11 @@
 The NES framebuffer is **256×240 RGB**. With `configs/scenario.json`, each *new recording* stores both:
 
 - `native_frames`: the original 256×240 RGB frame for readable annotation.
-- `observations`: a 128×120 grayscale input (four frames stacked) used by training/inference.
+- `observations`: a 256×240 grayscale input (four frames stacked) used by training/inference.
 
-The policy's observation size is configurable. Keep 128×120 for now: it is half the native width and height, retains the NES aspect ratio, and has one quarter as many pixels as 256×240. Full 256×240 policy input is possible by setting both dimensions to 256 and 240 **before recording and training**, but expect more memory/compute and retrain from scratch. Do not change only the training config and assume 128×120 data becomes native resolution.
+The active frame-perfect configuration uses full 256×240 spatial resolution with grayscale policy observations and one decision per raw NES frame (`frame_skip=1`). This costs more memory and compute than smaller inputs. Keep these settings consistent across recording, training, evaluation, and inference.
 
-Old NPZs that contain only 84×84 observations cannot regain discarded pixels. Since this project is starting clean, do not mix those files with the new set: use the reset script below or choose a new empty demonstration root. New native frames are captured only when recording with `mesen.capture_native_frames=true`.
+Old NPZs with 84×84 or 128×120 policy observations cannot regain discarded pixels. Since this project is starting clean, do not mix those files with the new set: use the reset script below or choose a new empty demonstration root. New native frames are captured only when recording with `mesen.capture_native_frames=true`.
 
 Check the data on disk before doing anything:
 
@@ -19,30 +19,22 @@ python -m tennis_rl.dataset stats --demo-root demonstrations
 
 Look for `native_capture_coverage`, `stored_observation_resolution_counts_by_point`, `recorded_frame_skip_counts_by_point`, and `controller_action_counts`. Confirm new points have native 256×240 capture and A/B actions appear if you pressed them.
 
-## 2. Frame sampling: use the right setting
+## 2. Frame sampling: frame-perfect contract
 
-`mesen.frame_skip` and the recorder's `--frame-skip` override mean **raw NES frames per recorded decision step**. The NES runs at about 60.1 frames/sec:
+The active configuration is intentionally fixed at `mesen.frame_skip=1`, `observation_width=256`, and `observation_height=240`. Each recorded observation/action pair corresponds to one raw NES frame (about 16.6 ms). Runtime validation rejects larger frame skips or smaller policy inputs, and the hierarchical manager/action pulses are constrained to one frame. This provides frame-level action resolution; it does not guarantee a perfect learned policy.
 
-| `--frame-skip` | Approx decision rate | Use |
-|---:|---:|---|
-| `1` | 60 Hz / 16.6 ms | Precise shot/button timing; most expensive and most data |
-| `2` | 30 Hz / 33.3 ms | Recommended general-purpose setting for movement and rally behavior |
-| `4` | 15 Hz / 66.6 ms | Coarse movement experiments only; usually too slow for precise timing |
-
-Start with **2** for your general demonstration set. If you want to train precise press-versus-wait behavior, collect a separate targeted set with `--frame-skip 1`; use `mesen.frame_skip=1` for its training/inference run too, and configure button pulse durations as `[1]`. Do not treat a `frame_skip=4` action as though it were sampled at 60 Hz.
-
-`--sample-every` is different: it only skips images in the annotation sheets. `--sample-every 1` shows every saved step and does **not** change recorded/training timing. `segment_length=16` and `stride=8` are also counted in saved steps; at skip 2 a 16-step segment spans 32 raw NES frames, about 0.53 s.
+`--sample-every` is different: it only skips images in annotation sheets. `--sample-every 1` shows every saved step and does **not** change recording or training timing. Segment length and stride count saved steps; at `frame_skip=1`, a 16-step segment spans 16 raw NES frames, about 0.27 seconds.
 
 ## 3. Reset the old data and record from scratch
 
 The reset script removes generated demonstrations/contact sheets and, when the switch is supplied, scenario savestates. It asks you to type a confirmation phrase. It will not delete source code, ROMs, the emulator, or unrelated folders. Run this from the repository root: `.\scripts\reset_demonstrations.ps1 -IncludeScenarioStates`. Then record both service roles into the newly created empty dataset using the explicit high-resolution config:
 
 ```powershell
-python -m tennis_rl.record --config configs/scenario.json --output demonstrations --frame-skip 2 --serve serve-first --scenario-tag level1_serve_rally
-python -m tennis_rl.record --config configs/scenario.json --output demonstrations --frame-skip 2 --serve receive-first --scenario-tag level1_receive_rally
+python -m tennis_rl.record --config configs/scenario.json --output demonstrations --frame-skip 1 --serve serve-first --scenario-tag level1_serve_rally
+python -m tennis_rl.record --config configs/scenario.json --output demonstrations --frame-skip 1 --serve receive-first --scenario-tag level1_receive_rally
 ```
 
-Finish the recorded game normally. `receive-first` skips Game 1 and records Game 2, when the human receives. Use a unique descriptive tag for each role/level. After one short test recording, rerun `dataset stats` and verify native coverage, action counts, stored 128×120 resolution, and frame skip 2 before making lots more data. Do not start large-scale recording until the native frame path has passed this audit.
+Finish the recorded game normally. `receive-first` skips Game 1 and records Game 2, when the human receives. Use a unique descriptive tag for each role/level. After one short test recording, rerun `dataset stats` and verify native coverage, action counts, stored 256×240 resolution, and frame skip 1 before making lots more data. Do not start large-scale recording until the native frame path has passed this audit.
 
 ## 4. Make large, readable review images
 

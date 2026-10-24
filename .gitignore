@@ -63,4 +63,15 @@ checkpoints_native128x120/
 runs_native128x120/
 checkpoints_hierarchical_native128x120/
 runs_hierarchical_native128x120/
+checkpoints_native256x240_frame1/
+runs_native256x240_frame1/
+checkpoints_hierarchical_native256x240_frame1/
+runs_hierarchical_native256x240_frame1/
 contact_sheets/
+
+# Local annotation studio database, audit history, and generated preview videos
+app/data/
+app/.cache/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm

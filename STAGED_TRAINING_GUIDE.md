@@ -59,7 +59,7 @@ For state supervision, annotate selected frames with normalized `[x,y]` location
 The foundation jointly warms up the shared visual encoder, recurrent belief state, all leaf heads, and the manager using only explicit labels that exist:
 
 ```powershell
-python -m tennis_rl.staged_train --config configs/scenario.json --stage foundation --split train --updates 1000 --batch-size 64 --eval-every 50 --output checkpoints_hierarchical_native128x120/stages/foundation.pt --device cuda
+python -m tennis_rl.staged_train --config configs/scenario.json --stage foundation --split train --updates 1000 --batch-size 64 --eval-every 50 --output checkpoints_hierarchical_native256x240_frame1/stages/foundation.pt --device cuda
 ```
 
 For a quick pipeline smoke test use `--updates 3 --batch-size 8 --eval-every 1`; do not use those tiny settings for a real model.
@@ -71,7 +71,7 @@ If no leaf/phase labels exist, this stage exits rather than synthesizing target 
 If `state_annotations.jsonl` contains enough verified coordinates/events, improve the shared encoder before training specialists. Every leaf must then be trained from this same updated checkpoint so its frozen encoder weights match at assembly time. If you have no trustworthy ball/player/contact labels yet, skip this stage rather than inventing labels; use the foundation checkpoint as the shared starting point and prioritize collecting/annotating examples.
 
 ```powershell
-python -m tennis_rl.staged_train --config configs/scenario.json --stage perception --init-from checkpoints_hierarchical_native128x120/stages/foundation.pt --split train --updates 500 --batch-size 64 --eval-every 25 --output checkpoints_hierarchical_native128x120/stages/perception.pt --device cuda
+python -m tennis_rl.staged_train --config configs/scenario.json --stage perception --init-from checkpoints_hierarchical_native256x240_frame1/stages/foundation.pt --split train --updates 500 --batch-size 64 --eval-every 25 --output checkpoints_hierarchical_native256x240_frame1/stages/perception.pt --device cuda
 ```
 
 ### 4.3 Independent leaf training
@@ -81,12 +81,12 @@ Each leaf starts from the *same shared checkpoint*: `perception.pt` if you train
 Use one shared checkpoint path consistently for **all** leaves and assembly. Default (no state-perception stage):
 
 ```powershell
-$Shared = "checkpoints_hierarchical_native128x120/stages/foundation.pt"
-python -m tennis_rl.staged_train --config configs/scenario.json --stage leaf --skill serve_timing --init-from $Shared --split train --updates 1000 --batch-size 64 --eval-every 50 --output checkpoints_hierarchical_native128x120/stages/leaf_serve_timing.pt --device cuda
-python -m tennis_rl.staged_train --config configs/scenario.json --stage leaf --skill receive_position --init-from $Shared --split train --updates 1000 --batch-size 64 --eval-every 50 --output checkpoints_hierarchical_native128x120/stages/leaf_receive_position.pt --device cuda
+$Shared = "checkpoints_hierarchical_native256x240_frame1/stages/foundation.pt"
+python -m tennis_rl.staged_train --config configs/scenario.json --stage leaf --skill serve_timing --init-from $Shared --split train --updates 1000 --batch-size 64 --eval-every 50 --output checkpoints_hierarchical_native256x240_frame1/stages/leaf_serve_timing.pt --device cuda
+python -m tennis_rl.staged_train --config configs/scenario.json --stage leaf --skill receive_position --init-from $Shared --split train --updates 1000 --batch-size 64 --eval-every 50 --output checkpoints_hierarchical_native256x240_frame1/stages/leaf_receive_position.pt --device cuda
 ```
 
-If and only if you trained the optional perception stage, set `$Shared = "checkpoints_hierarchical_native128x120/stages/perception.pt"` instead. Every leaf must start from that same exact base. Repeat for each task with adequate exact action annotations. The canonical task list is in `tennis_rl/hierarchy_schema.py`. You may train a subset during development, but a task left at the foundation weights is **not** a validated specialist. To run all thirteen tasks as a script (it deliberately stops at the first missing task annotation), use:
+If and only if you trained the optional perception stage, set `$Shared = "checkpoints_hierarchical_native256x240_frame1/stages/perception.pt"` instead. Every leaf must start from that same exact base. Repeat for each task with adequate exact action annotations. The canonical task list is in `tennis_rl/hierarchy_schema.py`. You may train a subset during development, but a task left at the foundation weights is **not** a validated specialist. To run all thirteen tasks as a script (it deliberately stops at the first missing task annotation), use:
 
 ```powershell
 .\scripts\train_leaf_experts.ps1 -Config configs/scenario.json -DemoRoot demonstrations -Foundation $Shared
@@ -96,9 +96,9 @@ If and only if you trained the optional perception stage, set `$Shared = "checkp
 
 ```powershell
 python -m tennis_rl.assemble_hierarchy --config configs/scenario.json --base $Shared `
-  --leaf serve_timing=checkpoints_hierarchical_native128x120/stages/leaf_serve_timing.pt `
-  --leaf receive_position=checkpoints_hierarchical_native128x120/stages/leaf_receive_position.pt `
-  --output checkpoints_hierarchical_native128x120/stages/leaves_assembled.pt
+  --leaf serve_timing=checkpoints_hierarchical_native256x240_frame1/stages/leaf_serve_timing.pt `
+  --leaf receive_position=checkpoints_hierarchical_native256x240_frame1/stages/leaf_receive_position.pt `
+  --output checkpoints_hierarchical_native256x240_frame1/stages/leaves_assembled.pt
 ```
 
 Add each trained leaf using another `--leaf TASK=PATH` argument. The assembler verifies the task list, button pulse schema, expert parameter schema, and that shared encoder weights are identical; it refuses to silently merge incompatible checkpoints.
@@ -106,7 +106,7 @@ Add each trained leaf using another `--leaf TASK=PATH` argument. The assembler v
 ### 4.5 Train the routing gates
 
 ```powershell
-python -m tennis_rl.staged_train --config configs/scenario.json --stage gates --init-from checkpoints_hierarchical_native128x120/stages/leaves_assembled.pt --split train --updates 1000 --batch-size 64 --eval-every 50 --output checkpoints_hierarchical_native128x120/stages/gated.pt --device cuda
+python -m tennis_rl.staged_train --config configs/scenario.json --stage gates --init-from checkpoints_hierarchical_native256x240_frame1/stages/leaves_assembled.pt --split train --updates 1000 --batch-size 64 --eval-every 50 --output checkpoints_hierarchical_native256x240_frame1/stages/gated.pt --device cuda
 ```
 
 Gate supervision must have broad phase labels (serve/receive/rally/transition) and exact leaf labels for sub-gate selection. It only learns explicit annotations. Skill duration is supervised only when `manager_duration` was explicitly labeled; otherwise duration is learned from online RL.
@@ -116,8 +116,8 @@ Gate supervision must have broad phase labels (serve/receive/rally/transition) a
 Leaf-level evaluations force the selected expert. The manager evaluation uses `--skill auto`. Each valid manifest state is restored and played for multiple full point attempts; logs include point outcomes, rewards, steps, faults, and bridge restarts.
 
 ```powershell
-python -m tennis_rl.evaluate_scenarios --config configs/scenario.json --checkpoint checkpoints_hierarchical_native128x120/stages/leaf_serve_timing.pt --skill serve_timing --manifest scenario_states/manifest.jsonl --split holdout --repeats 5 --device cuda --out runs_hierarchical_native128x120/eval_serve.jsonl
-python -m tennis_rl.evaluate_scenarios --config configs/scenario.json --checkpoint checkpoints_hierarchical_native128x120/stages/gated.pt --skill auto --manifest scenario_states/manifest.jsonl --split holdout --repeats 5 --device cuda --out runs_hierarchical_native128x120/eval_auto.jsonl
+python -m tennis_rl.evaluate_scenarios --config configs/scenario.json --checkpoint checkpoints_hierarchical_native256x240_frame1/stages/leaf_serve_timing.pt --skill serve_timing --manifest scenario_states/manifest.jsonl --split holdout --repeats 5 --device cuda --out runs_hierarchical_native256x240_frame1/eval_serve.jsonl
+python -m tennis_rl.evaluate_scenarios --config configs/scenario.json --checkpoint checkpoints_hierarchical_native256x240_frame1/stages/gated.pt --skill auto --manifest scenario_states/manifest.jsonl --split holdout --repeats 5 --device cuda --out runs_hierarchical_native256x240_frame1/eval_auto.jsonl
 ```
 
 For diagnostic skills, evaluator filters to compatible scenario state types. If no compatible holdout state exists, gather more data rather than switching silently to training states. Compare checkpoints with the same manifest, split, repeat count, seed and step horizon. Do not score truncated runs as wins or losses.
@@ -127,7 +127,7 @@ For diagnostic skills, evaluator filters to compatible scenario state types. If 
 Only after the leaf skills and gates show useful held-out behavior, fine-tune the assembled hierarchy using actual point-level outcomes:
 
 ```powershell
-python -m tennis_rl.train --config configs/scenario.json --algo hierarchical --init-from checkpoints_hierarchical_native128x120/stages/gated.pt --workers 4 --max-updates 100
+python -m tennis_rl.train --config configs/scenario.json --algo hierarchical --init-from checkpoints_hierarchical_native256x240_frame1/stages/gated.pt --workers 4 --max-updates 100
 ```
 
 `--init-from` loads weights only, starting a fresh optimizer. `--resume` is for continuing a previous online run with its optimizer/counters; it is not required for this staged-from-scratch workflow. Increase workers only after bridge stability tests. Use fixed held-out scenarios regularly; checkpoint every few updates early in development.

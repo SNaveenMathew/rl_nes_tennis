@@ -15,7 +15,7 @@ A match-level loss is not equivalent to every action being wrong. Therefore the 
 
 ## Episode definition
 
-The smallest training unit is a tennis point: observations/actions are accumulated until the existing bridge detects a score transition, point-end flag, or match termination. Each point is saved with four stacked 128×120 grayscale observations and the existing 27-action controller representation. New recordings also retain aligned native 256×240 RGB frames for human annotation when `capture_native_frames` is enabled.
+The smallest training unit is a tennis point: observations/actions are accumulated until the existing bridge detects a score transition, point-end flag, or match termination. Each point is saved with four stacked 256×240 grayscale observations and the existing 27-action controller representation. New recordings also retain aligned native 256×240 RGB frames for human annotation when `capture_native_frames` is enabled.
 
 ## Training
 

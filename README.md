@@ -45,10 +45,10 @@ The smoke script uses a deterministic mock environment, performs multiple hierar
 python -m tennis_rl.train --config configs/scenario.json --algo hierarchical --max-updates 3
 ```
 
-`--max-updates 3` is a short **real-emulator** smoke run; it still needs the configured ROM and Mesen executable. For longer training, omit `--max-updates` or set a larger value. Checkpoint and metrics paths are controlled by the `hierarchical` configuration section (`checkpoints_hierarchical_native128x120/`, `runs_hierarchical_native128x120/` by default). A resumed hierarchical checkpoint should use the hierarchical algorithm:
+`--max-updates 3` is a short **real-emulator** smoke run; it still needs the configured ROM and Mesen executable. For longer training, omit `--max-updates` or set a larger value. Checkpoint and metrics paths are controlled by the `hierarchical` configuration section (`checkpoints_hierarchical_native256x240_frame1/`, `runs_hierarchical_native256x240_frame1/` by default). A resumed hierarchical checkpoint should use the hierarchical algorithm:
 
 ```powershell
-python -m tennis_rl.train --config configs/scenario.json --algo hierarchical --resume checkpoints_hierarchical_native128x120/hierarchical_latest.pt
+python -m tennis_rl.train --config configs/scenario.json --algo hierarchical --resume checkpoints_hierarchical_native256x240_frame1/hierarchical_latest.pt
 ```
 
 ### 5. Compare against the flat baselines
@@ -63,7 +63,7 @@ Use equal scenario distributions and evaluation budgets when comparing models; d
 ### 6. Evaluate a checkpoint
 
 ```powershell
-python -m tennis_rl.evaluate --config configs/scenario.json --checkpoint checkpoints_hierarchical_native128x120/hierarchical_latest.pt --episodes 20
+python -m tennis_rl.evaluate --config configs/scenario.json --checkpoint checkpoints_hierarchical_native256x240_frame1/hierarchical_latest.pt --episodes 20
 ```
 
 Use only fixed held-out matches for reported win rates. Also report results by player/server role, serve and return success, completed points, match wins, and mean reward. Preserve the initial flat-PPO checkpoint for a baseline if one exists locally.
@@ -100,16 +100,16 @@ scripts/                  Sandbox smoke and Windows launch scripts
 
 The training stack can record live human NES Tennis play directly through Mesen/Lua. The recorder uses Mesen's `inputPolled` callback and `getInput()` API to capture the controller state while preserving interactive control; Mesen documents both APIs and recommends applying `setInput()` from `inputPolled` for scripted control.
 
-The scenario config uses 128×120 grayscale policy input, captures the native 256×240 RGB frame for annotation, and defaults to `frame_skip=2` (about 30 recorded decisions per second). Start a new, clean data set before recording; old checkpoints are also incompatible with the new input shape and these settings write to separate checkpoint/log directories.
+The scenario config uses full-resolution 256×240 grayscale policy input, captures the native 256×240 RGB frame for annotation, and defaults to `frame_skip=1` (about 60.1 decisions per second). Start a new, clean data set before recording; old checkpoints are also incompatible with the new input shape and these settings write to separate checkpoint/log directories.
 
 ```powershell
-python -m tennis_rl.record --config configs/scenario.json --level 1 --output demonstrations --frame-skip 2 --serve serve-first --scenario-tag level1_serve_rally
+python -m tennis_rl.record --config configs/scenario.json --level 1 --output demonstrations --frame-skip 1 --serve serve-first --scenario-tag level1_serve_rally
 ```
 
 Record a separate receiving match too:
 
 ```powershell
-python -m tennis_rl.record --config configs/scenario.json --level 1 --output demonstrations --frame-skip 2 --serve receive-first --scenario-tag level1_receive_rally
+python -m tennis_rl.record --config configs/scenario.json --level 1 --output demonstrations --frame-skip 1 --serve receive-first --scenario-tag level1_receive_rally
 ```
 
 See [`ANNOTATION_QUICK_GUIDE.md`](ANNOTATION_QUICK_GUIDE.md) for reset, annotation, visual review, data audit, and whole-match split commands. `--sample-every` affects only review sheets, not recording cadence.
@@ -134,7 +134,7 @@ demonstrations/
   level_5/
 ```
 
-Each new point file contains four stacked 128×120 grayscale policy observations, the 27-action controller label, reward, done flag, and metadata. With `mesen.capture_native_frames=true`, the recorder also stores the matching original 256×240 RGB image per step in `native_frames`, used for annotation only. Keep `frame_skip` consistent among recording, training, and evaluation. Old 84×84 data cannot be restored to higher resolution, so use a clean demonstration root when switching to this config. The match outcome determines the `winning`/`losing` directory; a lost match is not treated as if every action inside it were wrong.
+Each new point file contains four stacked 256×240 grayscale policy observations, the 27-action controller label, reward, done flag, and metadata. With `mesen.capture_native_frames=true`, the recorder also stores the matching original 256×240 RGB image per step in `native_frames`, used for annotation only. Keep `frame_skip` consistent among recording, training, and evaluation. Old 84×84 or 128×120 data cannot be restored to full spatial resolution, so use a clean demonstration root when switching to this config. The match outcome determines the `winning`/`losing` directory; a lost match is not treated as if every action inside it were wrong.
 
 ### Training with demonstrations
 

@@ -9,7 +9,7 @@
 |---|---|
 | `python -m compileall -q tennis_rl tests scripts` | Passed |
 | `python -m pytest -q` | **84 passed, 5 skipped** (7.68 seconds) |
-| Config parse (`configs/base.json.example`, `configs/scenario.json`) | Passed; hierarchical pipeline configured with 13 specialized tasks and 27 actions; new policy observations are 128×120 grayscale |
+| Config parse (`configs/base.json.example`, `configs/scenario.json`) | Passed; hierarchical pipeline configured with 13 specialized tasks and 27 actions; new policy observations are 256×240 grayscale |
 | `python scripts/sandbox_train_smoke.py` | Passed; three mock hierarchical PPO updates, finite metrics, checkpoint save/load round-trip; synthetic BC loss 4.6703 → 2.8291 |
 | Synthetic supervised sanity task | Passed; explicit behavior-cloning loss fell from **6.0044** to **4.1783** over 10 updates (about **30.4% lower**) |
 | `git diff --check` | Not run: this exported source directory has no `.git` metadata |
@@ -18,8 +18,8 @@ The skipped tests are Lupa-dependent and are skipped here because `lupa` is not 
 
 ## Latest recording/annotation runtime contract
 
-- New policy observations: four stacked **128×120 grayscale** frames; default `mesen.frame_skip=2` (approximately 30 decisions per second). Use the same spatial dimensions and frame skip for demonstrations, training and inference.
-- When recording is enabled, `capture_native_frames=true` stores aligned native **256×240 RGB** frames in each point NPZ for annotating sprites/events; training continues to consume grayscale policy frames. Native frames are not synthesized by enlarging old 84×84 data.
+- New policy observations: four stacked **256×240 grayscale** frames; default `mesen.frame_skip=1` (approximately 60.1 decisions per second). Use the same spatial dimensions and frame skip for demonstrations, training and inference.
+- When recording is enabled, `capture_native_frames=true` stores aligned native **256×240 RGB** frames in each point NPZ for annotating sprites/events; training continues to consume grayscale policy frames. Native frames are not synthesized by enlarging old 84×84 or 128×120 data.
 - `scripts/record.ps1` defaults to `configs/scenario.json`; `scripts/reset_demonstrations.ps1` is a guarded, explicit clean-start command. `scenario_states` is only removed when the operator deliberately adds `-IncludeScenarioStates`.
 - `python -m compileall -q tennis_rl tests scripts`: passed. CLI `--help` smoke checks passed for training, staged training, scenario evaluation, annotation, and dataset tools.
 - The Python suite skips Lupa-dependent tests because `lupa` is not installed here. The actual Windows Mesen 2.2.1 process and ROM were not run, so follow `scripts/check_mesen.ps1` before bulk recording.
