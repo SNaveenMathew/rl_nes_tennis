@@ -22,6 +22,7 @@ def patch_tennis_rom(
     rom_data: bytes | bytearray,
     level: int = 1,
     receive_first: bool = False,
+    side: str = "deuce",
     instant_entrance: bool = False,
 ) -> bytes:
     """Patch a Tennis (JU) NROM-128 ROM.
@@ -31,6 +32,8 @@ def patch_tennis_rom(
         level: Opponent difficulty level 1..5.
         receive_first: If True, CPU serves first from top court and Player 1 receives.
                        If False, Player 1 serves first from bottom court.
+        side: "deuce" (right service court, bit 0 = 1) or "ad"/"advantage"
+              (left service court, bit 0 = 0).
         instant_entrance: If True, reduces the serve pre-positioning window (RAM $0026)
             from $0A (10 ticks, ~100 frames) to $01 (~10 frames). When False (the
             default), the server and CPU retain the full window to move laterally
@@ -45,6 +48,14 @@ def patch_tennis_rom(
             f"Expected NES Tennis (JU) ROM of 24592 bytes (16-byte header + 16KB PRG + 8KB CHR); "
             f"got {len(rom_data)} bytes."
         )
+
+    side_lower = str(side).lower()
+    if side_lower in {"advantage", "ad"}:
+        side_val = 0
+    elif side_lower == "deuce":
+        side_val = 1
+    else:
+        raise ValueError(f"side must be 'deuce', 'ad', or 'advantage', got {side!r}")
 
     patched = bytearray(rom_data)
     level_val = max(0, min(4, int(level) - 1))
@@ -76,10 +87,12 @@ def patch_tennis_rom(
     patched[off_f87f : off_f87f + len(bootloader)] = bootloader
 
     # 3. Server Configuration Register at C7B0 (file offset 16 + 0x7B0 = 0x7C0):
-    # Original: A9 C1 (LDA #$C1) -> Bit 1 is 0 -> Player 1 serves.
-    # Patched:  A9 C3 (LDA #$C3) -> Bit 1 is 1 -> CPU serves, Player 1 receives.
+    # Base: 0xC0
+    # Bit 1: 0 = Player 1 serves, 1 = CPU serves.
+    # Bit 0: 1 = Deuce court, 0 = Advantage court.
+    # Original: A9 C1 (LDA #$C1) -> Player 1 serves, deuce court.
     off_c7b0 = 16 + (0xC7B0 - 0xC000)
-    server_byte = 0xC3 if receive_first else 0xC1
+    server_byte = 0xC0 | (2 if receive_first else 0) | side_val
     patched[off_c7b0 + 1] = server_byte
 
     # 4. Serve pre-positioning window at D7E1 (file offset 16 + (D7E1 - C000) = 0x17F1):
@@ -136,21 +149,25 @@ def resolve_rom(
     base_rom_path: str | Path,
     serve_mode: str = "serve-first",
     level: int = 1,
+    side: str = "deuce",
+    sampling: str = "point",
     output_dir: str | Path | None = None,
 ) -> Path:
     """Generate the correct patched ROM on demand and return its absolute path.
 
     This is the single entry-point used by all downstream scripts (train,
     record, evaluate, watch). It patches the base ROM for the requested
-    ``serve_mode`` and ``level``, writes it to ``output_dir`` (same directory
+    ``serve_mode``, ``level``, and ``side``, writes it to ``output_dir`` (same directory
     as the base ROM if not specified) and returns an absolute ``Path`` ready to
     pass directly to ``MesenWorker``.
 
-    The output filename encodes serve_mode and level so multiple processes
-    running at different levels never overwrite each other::
+    The output filename encodes serve_mode, level, and optional ad-side so multiple
+    processes running at different configurations never overwrite each other::
 
         Tennis (JU) - Serve-L2.nes
         Tennis (JU) - Receive-L3.nes
+        Tennis (JU) - Serve-L2-Ad.nes
+        Tennis (JU) - Receive-L3-Ad.nes
 
     The file is (re)written only when its content would change, so repeated
     calls are cheap.
@@ -163,6 +180,9 @@ def resolve_rom(
             game starts at the correct level even without the Lua bridge.  The
             bridge also writes MESEN_RL_LEVEL into RAM each frame, so this is
             consistent regardless of whether the bridge is active.
+        side: ``"deuce"`` (default, right court) or ``"ad"``/``"advantage"`` (left court).
+            Only valid when ``sampling="point"``.
+        sampling: ``"point"`` or ``"game"``. A regular game always starts on the deuce side.
         output_dir: Directory where the patched ROM is written. Defaults to
             the directory containing ``base_rom_path``.
 
@@ -170,7 +190,7 @@ def resolve_rom(
         Absolute ``Path`` to the patched ROM file.
 
     Raises:
-        ValueError: If ``serve_mode`` is not recognised.
+        ValueError: If ``serve_mode``, ``side``, or ``sampling`` configuration is invalid.
         FileNotFoundError: If ``base_rom_path`` does not exist.
     """
     if serve_mode not in {"serve-first", "receive-first"}:
@@ -178,6 +198,20 @@ def resolve_rom(
             f"serve_mode must be 'serve-first' or 'receive-first', got {serve_mode!r}"
         )
     level = max(1, min(5, int(level)))
+
+    side_lower = str(side).lower()
+    if sampling == "game" and side_lower in {"ad", "advantage"}:
+        raise ValueError(
+            f"side {side!r} is only supported when sampling is 'point'; "
+            "a regular game always starts on the deuce side."
+        )
+    if side_lower in {"ad", "advantage"}:
+        side_tag = "-Ad"
+    elif side_lower == "deuce":
+        side_tag = ""
+    else:
+        raise ValueError(f"side must be 'deuce', 'ad', or 'advantage', got {side!r}")
+
     base_path = Path(base_rom_path).resolve()
     if not base_path.is_file():
         # Check standard fallback locations
@@ -204,11 +238,11 @@ def resolve_rom(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     mode_tag = "Serve" if serve_mode == "serve-first" else "Receive"
-    out_path = out_dir / f"Tennis (JU) - {mode_tag}-L{level}.nes"
+    out_path = out_dir / f"Tennis (JU) - {mode_tag}-L{level}{side_tag}.nes"
 
     raw_bytes = base_path.read_bytes()
     receive_first = serve_mode == "receive-first"
-    patched = patch_tennis_rom(raw_bytes, level=level, receive_first=receive_first)
+    patched = patch_tennis_rom(raw_bytes, level=level, receive_first=receive_first, side=side_lower)
 
     # Only write if content differs (avoids churn when called repeatedly).
     if not out_path.exists() or out_path.read_bytes() != patched:
@@ -224,16 +258,44 @@ def main() -> int:
     parser.add_argument("--level", type=int, default=1, choices=range(1, 6), help="Default opponent level (1-5)")
     parser.add_argument("--serve", choices=["serve-first", "receive-first", "both"], default="both",
                         help="Generate specific serve mode or both")
+    parser.add_argument("--side", choices=["deuce", "ad", "advantage"], default="deuce",
+                        help="Service side: deuce (default) or ad/advantage (only valid when --sampling is point)")
+    parser.add_argument("--sampling", choices=["point", "game"], default="point",
+                        help="Sampling scope (side parameter is only allowed when --sampling is point)")
     args = parser.parse_args()
 
+    if args.sampling == "game" and args.side in {"ad", "advantage"}:
+        parser.error("--side (ad/advantage) is only supported when --sampling is 'point'; a regular game always starts on the deuce side.")
+
     if args.serve in {"serve-first", "receive-first"}:
-        out_path = resolve_rom(args.input, serve_mode=args.serve, level=args.level, output_dir=args.output_dir)
-        print(f"Generated {args.serve} (L{args.level}) ROM: {out_path}")
+        out_path = resolve_rom(
+            args.input,
+            serve_mode=args.serve,
+            level=args.level,
+            side=args.side,
+            sampling=args.sampling,
+            output_dir=args.output_dir,
+        )
+        print(f"Generated {args.serve} ({args.side}, L{args.level}) ROM: {out_path}")
     else:
-        s_path = resolve_rom(args.input, serve_mode="serve-first", level=args.level, output_dir=args.output_dir)
-        r_path = resolve_rom(args.input, serve_mode="receive-first", level=args.level, output_dir=args.output_dir)
-        print(f"Generated Serve-First (L{args.level}) ROM:   {s_path}")
-        print(f"Generated Receive-First (L{args.level}) ROM: {r_path}")
+        s_path = resolve_rom(
+            args.input,
+            serve_mode="serve-first",
+            level=args.level,
+            side=args.side,
+            sampling=args.sampling,
+            output_dir=args.output_dir,
+        )
+        r_path = resolve_rom(
+            args.input,
+            serve_mode="receive-first",
+            level=args.level,
+            side=args.side,
+            sampling=args.sampling,
+            output_dir=args.output_dir,
+        )
+        print(f"Generated Serve-First ({args.side}, L{args.level}) ROM:   {s_path}")
+        print(f"Generated Receive-First ({args.side}, L{args.level}) ROM: {r_path}")
     return 0
 
 

@@ -19,6 +19,7 @@
     "match_games": 1,
     "game_level": 1,
     "serve_mode": "serve-first",
+    "serve_side": "deuce",
     "ipc_dir": "runs/mesen_ipc",
     "transport": "file_mailbox",
     "capture_stderr": false,

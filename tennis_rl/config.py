@@ -23,6 +23,8 @@ class MesenConfig:
     # "serve-first": player serves game 1; "receive-first": CPU serves game 1.
     # resolve_rom() reads this to select and generate the correct patched ROM.
     serve_mode: str = "serve-first"
+    # "deuce": start serving on deuce (right) court; "ad": advantage (left) court (point mode only).
+    serve_side: str = "deuce"
     observation_width: int = 256
     observation_height: int = 240
     # Native RGB is stored only by the human demonstration recorder, never by RL workers.

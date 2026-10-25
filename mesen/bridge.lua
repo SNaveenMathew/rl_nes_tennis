@@ -314,6 +314,7 @@ local function poll_command()
 end
 
 local SERVE_MODE = os.getenv("MESEN_RL_SERVE_MODE") or "serve-first"
+local SERVE_SIDE = os.getenv("MESEN_RL_SERVE_SIDE") or "deuce"
 
 local function read_u8(addr)
     return emu.read(addr, emu.memType.nesMemory or emu.memType.cpu or 0, false)
@@ -330,10 +331,15 @@ local function get_boot_input()
     if s38 == 0 and s3D >= 1 then
         pcall(function()
             emu.write(0x004C, GAME_LEVEL - 1, emu.memType.nesMemory or emu.memType.cpu or 0)
-            if SERVE_MODE == "receive-first" then
-                local s8d = read_u8(0x008D)
-                if s8d ~= 0 and (s8d % 4 < 2) then
-                    emu.write(0x008D, s8d + 2, emu.memType.nesMemory or emu.memType.cpu or 0)
+            local s8d = read_u8(0x008D)
+            if s8d ~= 0 then
+                local low2 = s8d % 4
+                local base_byte = s8d - low2
+                local target_role = (SERVE_MODE == "receive-first") and 2 or 0
+                local target_side = (SERVE_SIDE == "ad" or SERVE_SIDE == "advantage") and 0 or 1
+                local target = base_byte + target_role + target_side
+                if target ~= s8d then
+                    emu.write(0x008D, target, emu.memType.nesMemory or emu.memType.cpu or 0)
                 end
             end
         end)
