@@ -108,9 +108,18 @@ def run(args: argparse.Namespace) -> int:
         if int(args.frame_skip) < 1:
             raise ValueError("--frame-skip must be a positive number of raw NES frames")
         cfg.mesen.frame_skip = int(args.frame_skip)
-    # Resolve and generate the correct patched ROM for this serve_mode + level.
+    side_mode = getattr(args, "side", "deuce")
+    sampling_mode = getattr(args, "sampling", "game")
+    if sampling_mode == "game" and side_mode in {"ad", "advantage"}:
+        raise ValueError("--side (ad/advantage) is only supported when --sampling is 'point'; a regular game always starts on the deuce side.")
+    cfg.mesen.serve_side = side_mode
+    # Resolve and generate the correct patched ROM for this serve_mode + level + side.
     cfg.mesen.rom = str(resolve_rom(
-        cfg.mesen.rom, serve_mode=cfg.mesen.serve_mode, level=cfg.mesen.game_level,
+        cfg.mesen.rom,
+        serve_mode=cfg.mesen.serve_mode,
+        level=cfg.mesen.game_level,
+        side=cfg.mesen.serve_side,
+        sampling=sampling_mode,
     ))
     print(f"ROM: {cfg.mesen.rom}")
     # CLI overrides must not quietly invalidate the one-input-per-raw-frame
@@ -132,6 +141,7 @@ def run(args: argparse.Namespace) -> int:
         match_games=effective_match_games,
         game_level=cfg.mesen.game_level,
         serve_mode=cfg.mesen.serve_mode,
+        serve_side=cfg.mesen.serve_side,
         point_win=cfg.reward.point_win,
         point_loss=cfg.reward.point_loss,
         game_win=cfg.reward.game_win,
@@ -167,6 +177,8 @@ def run(args: argparse.Namespace) -> int:
     metadata_base = {
         "rom": cfg.mesen.rom,
         "level": cfg.mesen.game_level,
+        "serve_mode": cfg.mesen.serve_mode,
+        "serve_side": cfg.mesen.serve_side,
         "frame_skip": cfg.mesen.frame_skip,
         "observation_shape": [cfg.environment.stack_size, cfg.mesen.observation_height, cfg.mesen.observation_width],
         "action_count": len(ACTIONS),
@@ -204,7 +216,7 @@ def run(args: argparse.Namespace) -> int:
     print(f"Recording NES Tennis human demonstration | level={cfg.mesen.game_level}")
     print(f"Policy input: {cfg.mesen.observation_width}x{cfg.mesen.observation_height} grayscale | native frames: {native_text}")
     print(f"Frame skip: {cfg.mesen.frame_skip} raw NES frames/step (~{decision_hz:.1f} decisions/s)")
-    print(f"Serve mode: {serve_mode} | Sampling: {sampling_mode} ({target_desc})")
+    print(f"Serve mode: {serve_mode} ({cfg.mesen.serve_side}) | Sampling: {sampling_mode} ({target_desc})")
     print(f"Output: {output_root.resolve()}")
     print("Play until target is reached. Close Mesen or Ctrl+C to stop.")
     try:
@@ -391,6 +403,7 @@ def run(args: argparse.Namespace) -> int:
                         "match_id": match_id,
                         "point_index": p["point_index"],
                         "serve_mode": serve_mode,
+                        "serve_side": cfg.mesen.serve_side,
                         "sampling": sampling_mode,
                         "match_outcome": match_outcome,
                         "player_games": final_p_games,
@@ -409,6 +422,7 @@ def run(args: argparse.Namespace) -> int:
                     **metadata_base,
                     "match_id": match_id,
                     "serve_mode": serve_mode,
+                    "serve_side": cfg.mesen.serve_side,
                     "sampling": sampling_mode,
                     "recorded_game_number": record_game_number,
                     "match_outcome": match_outcome,
@@ -450,10 +464,15 @@ def main() -> None:
                         help="A snapshot within this many steps of the point's end counts as 'late'.")
     parser.add_argument("--serve", choices=("serve-first", "receive-first"), default="serve-first",
                         help="Serve mode: player 1 serves first, or CPU serves first (player 1 receives).")
+    parser.add_argument("--side", choices=("deuce", "ad", "advantage"), default="deuce",
+                        help="Service side: 'deuce' or 'ad'/'advantage' (only valid when --sampling is 'point').")
     parser.add_argument("--frame-skip", type=int, default=None,
                         help="Raw NES frames per recorded observation. Default: config value. Match this value in train/evaluation config.")
     parser.add_argument("--scenario-tag", default="", help="Optional human-readable scenario label written into each point's metadata.")
-    raise SystemExit(run(parser.parse_args()))
+    args = parser.parse_args()
+    if args.sampling == "game" and args.side in {"ad", "advantage"}:
+        parser.error("--side (ad/advantage) is only supported when --sampling is 'point'; a regular game always starts on the deuce side.")
+    raise SystemExit(run(args))
 
 
 if __name__ == "__main__":

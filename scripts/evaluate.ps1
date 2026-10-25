@@ -3,6 +3,8 @@ param(
   [string]$Sampling = "",
   [ValidateSet("", "serve-first", "receive-first")]
   [string]$Serve = "",
+  [ValidateSet("", "deuce", "ad", "advantage")]
+  [string]$Side = "",
   [int]$Level = 0,
   [int]$Episodes = 20,
   [string]$Config = "configs/scenario.json",
@@ -11,12 +13,19 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+if ($Sampling -eq "game" -and ($Side -eq "ad" -or $Side -eq "advantage")) {
+  throw "--side (ad/advantage) is only supported when -Sampling is 'point'; a regular game always starts on the deuce side."
+}
+
 $EvalArgs = @("-m", "tennis_rl.evaluate", "--config", $Config, "--checkpoint", $Checkpoint, "--episodes", $Episodes)
 if ($Sampling) {
   $EvalArgs += @("--sampling", $Sampling)
 }
 if ($Serve) {
   $EvalArgs += @("--serve", $Serve)
+}
+if ($Side) {
+  $EvalArgs += @("--side", $Side)
 }
 if ($Level -ge 1 -and $Level -le 5) {
   $EvalArgs += @("--level", $Level)

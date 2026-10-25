@@ -58,7 +58,15 @@ def seed_everything(seed: int) -> None:
 def build_workers(cfg, *, strict_lockstep: bool = False):
     serve_mode = getattr(cfg.mesen, "serve_mode", "serve-first")
     game_level = getattr(cfg.mesen, "game_level", 1)
-    cfg.mesen.rom = str(resolve_rom(cfg.mesen.rom, serve_mode=serve_mode, level=game_level))
+    serve_side = getattr(cfg.mesen, "serve_side", "deuce")
+    sampling = "point" if (getattr(cfg.scenario, "enabled", False) and getattr(cfg.scenario, "point_episodes", False)) else "game"
+    cfg.mesen.rom = str(resolve_rom(
+        cfg.mesen.rom,
+        serve_mode=serve_mode,
+        level=game_level,
+        side=serve_side,
+        sampling=sampling,
+    ))
     run_id = f"run_{time.strftime('%Y%m%d_%H%M%S')}_{random.getrandbits(40):010x}"
     return [
         MesenWorker(
@@ -73,6 +81,7 @@ def build_workers(cfg, *, strict_lockstep: bool = False):
             match_games=cfg.mesen.match_games,
             game_level=game_level,
             serve_mode=serve_mode,
+            serve_side=serve_side,
             startup_timeout=cfg.mesen.startup_timeout_s,
             socket_timeout=cfg.mesen.socket_timeout_s,
             point_win=cfg.reward.point_win,
@@ -313,6 +322,8 @@ def main():
                         help="Serve mode: who serves game 1 (default from config).")
     parser.add_argument("--sampling", "--episode-mode", choices=["point", "game"], default=None,
                         help="Sampling / episode approach: 'point' (continue till end of point) or 'game' (play a regular game).")
+    parser.add_argument("--side", choices=["deuce", "ad", "advantage"], default=None,
+                        help="Service side: 'deuce' or 'ad'/'advantage' (only valid when --sampling is 'point').")
     parser.add_argument("--workers", type=int, default=None,
                         help="Override number of Mesen parallel workers")
     parser.add_argument("--max-updates", type=int, default=None,
@@ -348,13 +359,23 @@ def main():
             cfg.scenario.segment_mode = False
         elif args.sampling == "point":
             cfg.scenario.point_episodes = True
+    sampling_tag = args.sampling or ("point" if (cfg.scenario.enabled and cfg.scenario.point_episodes) else "game")
+    if args.side is not None:
+        if sampling_tag == "game" and args.side in {"ad", "advantage"}:
+            parser.error("--side (ad/advantage) is only supported when --sampling is 'point'; a regular game always starts on the deuce side.")
+        cfg.mesen.serve_side = args.side
+    elif sampling_tag == "game" and getattr(cfg.mesen, "serve_side", "deuce") in {"ad", "advantage"}:
+        cfg.mesen.serve_side = "deuce"
     if args.workers is not None:
         cfg.mesen.workers = args.workers
     cfg.mesen.rom = str(resolve_rom(
-        cfg.mesen.rom, serve_mode=cfg.mesen.serve_mode, level=cfg.mesen.game_level,
+        cfg.mesen.rom,
+        serve_mode=cfg.mesen.serve_mode,
+        level=cfg.mesen.game_level,
+        side=cfg.mesen.serve_side,
+        sampling=sampling_tag,
     ))
-    sampling_tag = args.sampling or ("point" if (cfg.scenario.enabled and cfg.scenario.point_episodes) else "game")
-    print(f"Algorithm: {args.algo} | Sampling: {sampling_tag} | Serve: {cfg.mesen.serve_mode} | Level: {cfg.mesen.game_level}")
+    print(f"Algorithm: {args.algo} | Sampling: {sampling_tag} | Serve: {cfg.mesen.serve_mode} ({cfg.mesen.serve_side}) | Level: {cfg.mesen.game_level}")
     print(f"ROM: {cfg.mesen.rom}")
     if args.algo == "hierarchical":
         from .hierarchical_train import run_hierarchical_training

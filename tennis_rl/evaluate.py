@@ -28,17 +28,29 @@ def main() -> None:
                         help="Serve mode: who serves game 1 (default from config).")
     parser.add_argument("--sampling", "--episode-mode", choices=["point", "game"], default="game",
                         help="Evaluation sampling / episode scope: 'point' (evaluate N individual points) or 'game' (evaluate N regular games).")
+    parser.add_argument("--side", choices=["deuce", "ad", "advantage"], default=None,
+                        help="Service side: 'deuce' or 'ad'/'advantage' (only valid when --sampling is 'point').")
     args = parser.parse_args()
+    if args.sampling == "game" and args.side in {"ad", "advantage"}:
+        parser.error("--side (ad/advantage) is only supported when --sampling is 'point'; a regular game always starts on the deuce side.")
 
     cfg = load_config(args.config)
     if args.level is not None:
         cfg.mesen.game_level = args.level
     if args.serve is not None:
         cfg.mesen.serve_mode = args.serve
+    if args.side is not None:
+        cfg.mesen.serve_side = args.side
+    elif args.sampling == "game":
+        cfg.mesen.serve_side = "deuce"
     cfg.mesen.rom = str(resolve_rom(
-        cfg.mesen.rom, serve_mode=cfg.mesen.serve_mode, level=cfg.mesen.game_level,
+        cfg.mesen.rom,
+        serve_mode=cfg.mesen.serve_mode,
+        level=cfg.mesen.game_level,
+        side=cfg.mesen.serve_side,
+        sampling=args.sampling,
     ))
-    print(f"Evaluation | Sampling: {args.sampling} | Serve: {cfg.mesen.serve_mode} | Level: {cfg.mesen.game_level}")
+    print(f"Evaluation | Sampling: {args.sampling} | Serve: {cfg.mesen.serve_mode} ({cfg.mesen.serve_side}) | Level: {cfg.mesen.game_level}")
     print(f"ROM: {cfg.mesen.rom}")
     if cfg.mesen.transport != "file_mailbox":
         raise ValueError(f"Unsupported Mesen transport: {cfg.mesen.transport!r}; expected 'file_mailbox'")
@@ -66,6 +78,7 @@ def main() -> None:
             match_games=cfg.mesen.match_games,
             game_level=cfg.mesen.game_level,
             serve_mode=cfg.mesen.serve_mode,
+            serve_side=cfg.mesen.serve_side,
             point_win=cfg.reward.point_win,
             point_loss=cfg.reward.point_loss,
             game_win=cfg.reward.game_win,

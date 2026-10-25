@@ -4,6 +4,8 @@ param(
     [int]$Points = 1,
     [ValidateSet("serve-first", "receive-first")]
     [string]$Serve = "serve-first",
+    [ValidateSet("deuce", "ad", "advantage")]
+    [string]$Side = "deuce",
     [int]$Level = 1,
     [string]$Output = "demonstrations",
     [string]$Config = "configs/scenario.json",
@@ -13,8 +15,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 if ($FrameSkip -lt 0) { throw "FrameSkip must be 0 (use config) or a positive integer." }
-# Equivalent CLI form: python -m tennis_rl.record --config $Config --level $Level --output $Output --serve $Serve --sampling $Sampling
-$RecordArgs = @("-m", "tennis_rl.record", "--config", $Config, "--level", $Level, "--output", $Output, "--serve", $Serve, "--sampling", $Sampling)
+if ($Sampling -eq "game" -and ($Side -eq "ad" -or $Side -eq "advantage")) {
+    throw "--side (ad/advantage) is only supported when -Sampling is 'point'; a regular game always starts on the deuce side."
+}
+# Equivalent CLI form: python -m tennis_rl.record --config $Config --level $Level --output $Output --serve $Serve --side $Side --sampling $Sampling
+$RecordArgs = @("-m", "tennis_rl.record", "--config", $Config, "--level", $Level, "--output", $Output, "--serve", $Serve, "--side", $Side, "--sampling", $Sampling)
 if ($Sampling -eq "point" -and $Points -gt 0) {
     $RecordArgs += @("--points", $Points)
 }
