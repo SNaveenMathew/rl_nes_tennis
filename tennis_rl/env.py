@@ -225,13 +225,21 @@ class ParallelTennis:
             self.total_env_steps += 1
 
             assignment = self.assignments[i]
-            point_mode = (
+            point_mode = bool(
                 self.point_episodes
+                and (
+                    assignment is None
+                    or getattr(assignment, "kind", None) in ("scenario", "probe", "anchor")
+                )
+            )
+            is_segment = bool(
+                point_mode
+                and self.segment_mode
                 and assignment is not None
-                and assignment.kind in ("scenario", "probe")
+                and getattr(assignment, "kind", None) in ("scenario", "probe")
             )
             phase = getattr(assignment, "phase", None) if assignment is not None else None
-            if point_mode and self.segment_mode:
+            if is_segment:
                 if phase == "late":
                     limit = self.late_max_steps
                 elif phase == "mid":

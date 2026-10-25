@@ -23,6 +23,7 @@ from .model import RecurrentActorCritic
 from .ppo import PPOTrainer, Rollout, compute_gae_with_truncation
 from .scenario_sampler import SamplerConfig, ScenarioLibrary, ScenarioSampler
 from .scenarios import load_manifest
+from .rom_patcher import resolve_rom
 from .segment_replay import DemoSegmentReplayer, SegmentReplayConfig
 
 
@@ -55,6 +56,9 @@ def seed_everything(seed: int) -> None:
 
 
 def build_workers(cfg, *, strict_lockstep: bool = False):
+    serve_mode = getattr(cfg.mesen, "serve_mode", "serve-first")
+    game_level = getattr(cfg.mesen, "game_level", 1)
+    cfg.mesen.rom = str(resolve_rom(cfg.mesen.rom, serve_mode=serve_mode, level=game_level))
     run_id = f"run_{time.strftime('%Y%m%d_%H%M%S')}_{random.getrandbits(40):010x}"
     return [
         MesenWorker(
@@ -67,7 +71,8 @@ def build_workers(cfg, *, strict_lockstep: bool = False):
             height=cfg.mesen.observation_height,
             frame_skip=cfg.mesen.frame_skip,
             match_games=cfg.mesen.match_games,
-            game_level=cfg.mesen.game_level,
+            game_level=game_level,
+            serve_mode=serve_mode,
             startup_timeout=cfg.mesen.startup_timeout_s,
             socket_timeout=cfg.mesen.socket_timeout_s,
             point_win=cfg.reward.point_win,
@@ -302,7 +307,12 @@ def main():
                         help="Train with the learned hierarchy (default), flat recurrent PPO baseline, or DQfD baseline")
     parser.add_argument("--resume", default="", help="Resume model and optimizer state from a compatible trainer checkpoint")
     parser.add_argument("--init-from", default="", help="Initialize weights only from a staged hierarchy checkpoint; optimizer starts fresh")
-    parser.add_argument("--level", type=int, choices=range(1, 6), default=None)
+    parser.add_argument("--level", type=int, choices=range(1, 6), default=None,
+                        help="CPU opponent level (1-5, default from config).")
+    parser.add_argument("--serve", default=None, choices=["serve-first", "receive-first"],
+                        help="Serve mode: who serves game 1 (default from config).")
+    parser.add_argument("--sampling", "--episode-mode", choices=["point", "game"], default=None,
+                        help="Sampling / episode approach: 'point' (continue till end of point) or 'game' (play a regular game).")
     parser.add_argument("--workers", type=int, default=None,
                         help="Override number of Mesen parallel workers")
     parser.add_argument("--max-updates", type=int, default=None,
@@ -329,8 +339,23 @@ def main():
         print(f"Demonstration compatibility: {demo_compat}")
     if args.level is not None:
         cfg.mesen.game_level = args.level
+    if args.serve is not None:
+        cfg.mesen.serve_mode = args.serve
+    if args.sampling is not None:
+        if args.sampling == "game":
+            cfg.scenario.enabled = False
+            cfg.scenario.point_episodes = False
+            cfg.scenario.segment_mode = False
+        elif args.sampling == "point":
+            cfg.scenario.point_episodes = True
     if args.workers is not None:
         cfg.mesen.workers = args.workers
+    cfg.mesen.rom = str(resolve_rom(
+        cfg.mesen.rom, serve_mode=cfg.mesen.serve_mode, level=cfg.mesen.game_level,
+    ))
+    sampling_tag = args.sampling or ("point" if (cfg.scenario.enabled and cfg.scenario.point_episodes) else "game")
+    print(f"Algorithm: {args.algo} | Sampling: {sampling_tag} | Serve: {cfg.mesen.serve_mode} | Level: {cfg.mesen.game_level}")
+    print(f"ROM: {cfg.mesen.rom}")
     if args.algo == "hierarchical":
         from .hierarchical_train import run_hierarchical_training
         run_hierarchical_training(
@@ -467,7 +492,7 @@ def main():
         workers,
         stack_size=cfg.environment.stack_size,
         max_steps=cfg.environment.episode_max_steps,
-        point_episodes=sc.enabled and sc.point_episodes,
+        point_episodes=bool(sc.point_episodes) if args.sampling == "point" else bool(sc.enabled and sc.point_episodes),
         point_max_steps=sc.point_max_steps,
         scenario_provider=scenario_provider,
         segment_mode=sc.enabled and getattr(sc, "segment_mode", True),

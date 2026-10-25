@@ -14,6 +14,7 @@ from .mesen_client import MesenWorker
 from .model import RecurrentActorCritic
 from .hierarchical import HierarchicalActorCritic, HierarchicalController
 from .inference_compat import validate_checkpoint_runtime
+from .rom_patcher import resolve_rom
 
 
 def main() -> None:
@@ -23,11 +24,22 @@ def main() -> None:
     parser.add_argument("--episodes", type=int, default=20)
     parser.add_argument("--level", type=int, default=None, choices=range(1, 6), metavar="{1-5}",
                         help="CPU difficulty level (1-5, default from config).")
+    parser.add_argument("--serve", default=None, choices=["serve-first", "receive-first"],
+                        help="Serve mode: who serves game 1 (default from config).")
+    parser.add_argument("--sampling", "--episode-mode", choices=["point", "game"], default="game",
+                        help="Evaluation sampling / episode scope: 'point' (evaluate N individual points) or 'game' (evaluate N regular games).")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     if args.level is not None:
         cfg.mesen.game_level = args.level
+    if args.serve is not None:
+        cfg.mesen.serve_mode = args.serve
+    cfg.mesen.rom = str(resolve_rom(
+        cfg.mesen.rom, serve_mode=cfg.mesen.serve_mode, level=cfg.mesen.game_level,
+    ))
+    print(f"Evaluation | Sampling: {args.sampling} | Serve: {cfg.mesen.serve_mode} | Level: {cfg.mesen.game_level}")
+    print(f"ROM: {cfg.mesen.rom}")
     if cfg.mesen.transport != "file_mailbox":
         raise ValueError(f"Unsupported Mesen transport: {cfg.mesen.transport!r}; expected 'file_mailbox'")
     if cfg.device == "cuda" and not torch.cuda.is_available():
@@ -53,6 +65,7 @@ def main() -> None:
             cfg.mesen.socket_timeout_s,
             match_games=cfg.mesen.match_games,
             game_level=cfg.mesen.game_level,
+            serve_mode=cfg.mesen.serve_mode,
             point_win=cfg.reward.point_win,
             point_loss=cfg.reward.point_loss,
             game_win=cfg.reward.game_win,
@@ -65,7 +78,9 @@ def main() -> None:
         )
         for i in range(min(cfg.mesen.workers, args.episodes))
     ]
-    env = ParallelTennis(workers, cfg.environment.stack_size, cfg.environment.episode_max_steps)
+    is_point = args.sampling == "point"
+    max_steps = getattr(cfg.scenario, "point_max_steps", 900) if is_point else cfg.environment.episode_max_steps
+    env = ParallelTennis(workers, cfg.environment.stack_size, max_steps, point_episodes=is_point, point_max_steps=max_steps)
 
     controller = None
     if hierarchical:
@@ -143,14 +158,23 @@ def main() -> None:
                     o_games = int(batch.infos[i].get("opponent_games", 0))
                     player_games_list.append(p_games)
                     opponent_games_list.append(o_games)
-                    if p_games > o_games:
-                        wins += 1
+                    if args.sampling == "point":
+                        pt_res = int(batch.infos[i].get("point_result", 0))
+                        is_win = (pt_res > 0) if pt_res != 0 else (current_rewards[i] > 0)
+                        if is_win:
+                            wins += 1
+                    else:
+                        if p_games > o_games or (p_games == o_games and current_rewards[i] > 0):
+                            wins += 1
                     current_rewards[i] = 0
-        print(f"episodes={completed}")
-        print(f"match_wins={wins}")
+        unit = "points" if args.sampling == "point" else "games"
+        print(f"evaluation_mode={args.sampling}")
+        print(f"episodes={completed} {unit}")
+        print(f"wins={wins}")
         print(f"win_rate={wins / max(completed, 1):.3f}")
-        print(f"mean_player_games={float(np.mean(player_games_list)):.2f}")
-        print(f"mean_opponent_games={float(np.mean(opponent_games_list)):.2f}")
+        if args.sampling == "game":
+            print(f"mean_player_games={float(np.mean(player_games_list)):.2f}")
+            print(f"mean_opponent_games={float(np.mean(opponent_games_list)):.2f}")
         print(f"mean_reward={float(np.mean(rewards)):.3f}")
     finally:
         env.close()

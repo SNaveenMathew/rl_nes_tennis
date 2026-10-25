@@ -13,6 +13,7 @@ import numpy as np
 from .actions import ACTIONS, ACTION_NAMES, encode_action
 from .config import load_config, validate_frame_perfect_config
 from .mesen_client import BridgeError, MesenWorker
+from .rom_patcher import resolve_rom
 from .scenarios import StateRecord, advance_score, cell_id, split_for_match
 
 
@@ -93,25 +94,25 @@ def save_point(
 def run(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
     serve_mode = getattr(args, "serve", "serve-first")
-    # NES Tennis has player 1 serve the first game and alternates service by
-    # game. In receive-first mode we therefore run two games, discard the
-    # first (warm-up) game, and record only game 2.
-    effective_match_games = cfg.mesen.match_games
-    record_game_number = 1
-    if serve_mode == "receive-first":
-        # Only two games are needed: Game 1 is the warm-up and Game 2 is the
-        # first game in which Player 1 receives. The recorder exits immediately
-        # after Game 2, so the bridge never needs a longer match horizon here.
-        effective_match_games = 2
-        record_game_number = 2
     if serve_mode not in {"serve-first", "receive-first"}:
-        raise ValueError(f"Unsupported serve mode: {serve_mode}")
+        raise ValueError(f"Unsupported serve mode: {serve_mode!r}")
+    cfg.mesen.serve_mode = serve_mode
+    effective_match_games = cfg.mesen.match_games
+    # NES Tennis has player 1 serve the first game and alternates service by game.
+    # The patched ROM boots directly into the correct server configuration, so
+    # recording starts at game 1 in both modes.
+    record_game_number = 1
     if args.level is not None:
         cfg.mesen.game_level = args.level
     if getattr(args, "frame_skip", None) is not None:
         if int(args.frame_skip) < 1:
             raise ValueError("--frame-skip must be a positive number of raw NES frames")
         cfg.mesen.frame_skip = int(args.frame_skip)
+    # Resolve and generate the correct patched ROM for this serve_mode + level.
+    cfg.mesen.rom = str(resolve_rom(
+        cfg.mesen.rom, serve_mode=cfg.mesen.serve_mode, level=cfg.mesen.game_level,
+    ))
+    print(f"ROM: {cfg.mesen.rom}")
     # CLI overrides must not quietly invalidate the one-input-per-raw-frame
     # demonstration contract enforced by the standard configs.
     validate_frame_perfect_config(cfg, context="recording options")
@@ -130,6 +131,7 @@ def run(args: argparse.Namespace) -> int:
         cfg.mesen.socket_timeout_s,
         match_games=effective_match_games,
         game_level=cfg.mesen.game_level,
+        serve_mode=cfg.mesen.serve_mode,
         point_win=cfg.reward.point_win,
         point_loss=cfg.reward.point_loss,
         game_win=cfg.reward.game_win,
@@ -158,7 +160,7 @@ def run(args: argparse.Namespace) -> int:
     prev_game_total = 0
     prev_p_games = 0
     prev_o_games = 0
-    recording_started = serve_mode == "serve-first"
+    recording_started = True
     recorded_game_outcome: str | None = None
     in_dead_time = False
     points: list[dict[str, object]] = []
@@ -197,15 +199,14 @@ def run(args: argparse.Namespace) -> int:
 
     decision_hz = 60.1 / max(cfg.mesen.frame_skip, 1)
     native_text = "enabled (256x240 RGB per step)" if cfg.mesen.capture_native_frames else "disabled"
+    sampling_mode = getattr(args, "sampling", "game")
+    target_desc = f"{getattr(args, 'points', 1)} point(s)" if sampling_mode == "point" else "regular game"
     print(f"Recording NES Tennis human demonstration | level={cfg.mesen.game_level}")
     print(f"Policy input: {cfg.mesen.observation_width}x{cfg.mesen.observation_height} grayscale | native frames: {native_text}")
     print(f"Frame skip: {cfg.mesen.frame_skip} raw NES frames/step (~{decision_hz:.1f} decisions/s)")
-    print(f"Serve mode: {serve_mode} | recording game {record_game_number}")
+    print(f"Serve mode: {serve_mode} | Sampling: {sampling_mode} ({target_desc})")
     print(f"Output: {output_root.resolve()}")
-    if serve_mode == "receive-first":
-        print("Game 1 is a warm-up. Play it normally; recording begins when Game 2 starts (opponent serves).")
-    else:
-        print("Play one complete game. Close Mesen or Ctrl+C to stop.")
+    print("Play until target is reached. Close Mesen or Ctrl+C to stop.")
     try:
         # First observation establishes the initial state; action/reward pair starts with the next sample.
         worker.action(0)
@@ -240,17 +241,6 @@ def run(args: argparse.Namespace) -> int:
             o_games = int(info.get("opponent_games", 0))
             game_total = p_games + o_games
 
-            if serve_mode == "receive-first" and not recording_started and game_total >= 1:
-                recording_started = True
-                print("RECORDING STARTED: Game 2 / receive-first", flush=True)
-                # This step carries game 1's end reward. Do not let it leak into
-                # the first recorded point; start clean after the changeover.
-                observations, actions, rewards, dones, pulse_frames, native_frames = [], [], [], [], [], []
-                prev_p_score, prev_o_score = p_score, o_score
-                prev_p_games, prev_o_games, prev_game_total = p_games, o_games, game_total
-                in_dead_time = True
-                previous_obs = next_stack
-                continue
 
             # RAM flag 'point_end' is non-zero for the whole dead time around a
             # point (rally over -> score updates -> next serve is ready), roughly
@@ -349,11 +339,15 @@ def run(args: argparse.Namespace) -> int:
                                             step_in_point=h_step, split=h_split).to_json())
 
             game_changed = game_total != prev_game_total
-            if game_changed and serve_mode == "receive-first" and recording_started and game_total >= 2:
-                recorded_game_outcome = "winning" if p_games > prev_p_games else "losing"
-                # In a two-game receive-first session, game 2 is the recorded
-                # game. Stop as soon as that game has completed.
-                match_outcome = recorded_game_outcome
+            finish_point_sampling = (sampling_mode == "point" and point_boundary and len(points) >= getattr(args, "points", 1))
+            finish_game_sampling = (sampling_mode == "game" and game_changed and recording_started and game_total >= effective_match_games)
+
+            if finish_point_sampling or finish_game_sampling:
+                if sampling_mode == "point":
+                    pt_wins = sum(1 for p in points if p["provisional_outcome"] == "winning")
+                    match_outcome = "winning" if pt_wins >= len(points) - pt_wins else "losing"
+                else:
+                    match_outcome = "winning" if p_games > prev_p_games else "losing"
                 match_dir = _level_outcome_dir(output_root, cfg.mesen.game_level, match_outcome, match_id)
                 for p in points:
                     metadata = dict(metadata_base)
@@ -361,6 +355,7 @@ def run(args: argparse.Namespace) -> int:
                         "match_id": match_id,
                         "point_index": p["point_index"],
                         "serve_mode": serve_mode,
+                        "sampling": sampling_mode,
                         "recorded_game_number": record_game_number,
                         "recorded_game_outcome": match_outcome,
                         "player_games_at_end": p_games,
@@ -373,12 +368,14 @@ def run(args: argparse.Namespace) -> int:
                                point_index=p["point_index"], metadata=metadata, pulse_frames=p.get("pulse_frames"),
                                native_frames=p.get("native_frames"))
                 summary = {**metadata_base, "match_id": match_id, "serve_mode": serve_mode,
+                           "sampling": sampling_mode,
                            "recorded_game_number": record_game_number, "recorded_game_outcome": match_outcome,
                            "player_games_at_end": p_games, "opponent_games_at_end": o_games,
                            "points": len(points)}
                 (match_dir / "match.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
-                print(f"RECORDED GAME COMPLETE: {match_outcome} | Game {record_game_number} | {p_games}-{o_games}")
-                print(f"Saved {len(points)} point episodes under {match_dir}")
+                label = f"{len(points)} point(s)" if sampling_mode == "point" else f"Game {record_game_number} ({p_games}-{o_games})"
+                print(f"RECORDING COMPLETE: {match_outcome} | {label}")
+                print(f"Saved {len(points)} point episode(s) under {match_dir}")
                 return 0
 
             prev_p_games, prev_o_games, prev_game_total = p_games, o_games, game_total
@@ -393,6 +390,8 @@ def run(args: argparse.Namespace) -> int:
                     metadata.update({
                         "match_id": match_id,
                         "point_index": p["point_index"],
+                        "serve_mode": serve_mode,
+                        "sampling": sampling_mode,
                         "match_outcome": match_outcome,
                         "player_games": final_p_games,
                         "opponent_games": final_o_games,
@@ -410,6 +409,7 @@ def run(args: argparse.Namespace) -> int:
                     **metadata_base,
                     "match_id": match_id,
                     "serve_mode": serve_mode,
+                    "sampling": sampling_mode,
                     "recorded_game_number": record_game_number,
                     "match_outcome": match_outcome,
                     "player_games": final_p_games,
@@ -434,7 +434,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Record a human NES Tennis match into point-level training episodes.")
     parser.add_argument("--config", default="configs/base.json")
     parser.add_argument("--output", default="demonstrations")
-    parser.add_argument("--level", type=int, choices=range(1, 6), default=None)
+    parser.add_argument("--level", type=int, choices=range(1, 6), default=None,
+                        help="CPU opponent level (1-5, default from config).")
+    parser.add_argument("--sampling", "--episode-mode", choices=("point", "game"), default="game",
+                        help="Recording approach: 'point' (play till end of point, record N points and exit) or 'game' (play a regular game).")
+    parser.add_argument("--points", type=int, default=1,
+                        help="Target number of points to record when --sampling is 'point' (default: 1).")
     parser.add_argument("--harvest-dir", default="",
                         help="Also save emulator states for point-level scenario training into this directory.")
     parser.add_argument("--settle-steps", type=int, default=4,
@@ -444,7 +449,7 @@ def main() -> None:
     parser.add_argument("--late-steps", type=int, default=45,
                         help="A snapshot within this many steps of the point's end counts as 'late'.")
     parser.add_argument("--serve", choices=("serve-first", "receive-first"), default="serve-first",
-                        help="Record with player serving first, or skip Game 1 and record Game 2 while receiving first.")
+                        help="Serve mode: player 1 serves first, or CPU serves first (player 1 receives).")
     parser.add_argument("--frame-skip", type=int, default=None,
                         help="Raw NES frames per recorded observation. Default: config value. Match this value in train/evaluation config.")
     parser.add_argument("--scenario-tag", default="", help="Optional human-readable scenario label written into each point's metadata.")

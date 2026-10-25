@@ -45,15 +45,13 @@ def test_automatic_boot_uses_single_frame_menu_pulses_and_requested_level():
 def test_record_cli_supports_receive_first_mode():
     text = Path("tennis_rl/record.py").read_text(encoding="utf-8")
     assert 'choices=("serve-first", "receive-first")' in text
-    assert 'effective_match_games = 2' in text
-    assert 'record_game_number = 2' in text
+    assert 'resolve_rom' in text
+    assert 'cfg.mesen.serve_mode = serve_mode' in text
 
 
-def test_receive_first_records_only_game_two():
+def test_receive_first_uses_patched_rom_directly():
     text = Path("tennis_rl/record.py").read_text(encoding="utf-8")
-    assert 'recording_started = serve_mode == "serve-first"' in text
-    assert 'game_total >= 1' in text
-    assert 'game_total >= 2' in text
+    assert 'recording_started = True' in text
     assert 'recorded_game_outcome' in text
 
 

@@ -1,8 +1,11 @@
 param(
-    [int]$Level = 1,
-    [string]$Output = "demonstrations",
+    [ValidateSet("game", "point")]
+    [string]$Sampling = "game",
+    [int]$Points = 1,
     [ValidateSet("serve-first", "receive-first")]
     [string]$Serve = "serve-first",
+    [int]$Level = 1,
+    [string]$Output = "demonstrations",
     [string]$Config = "configs/scenario.json",
     [int]$FrameSkip = 0,
     [string]$ScenarioTag = ""
@@ -10,8 +13,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 if ($FrameSkip -lt 0) { throw "FrameSkip must be 0 (use config) or a positive integer." }
-# Equivalent CLI form: python -m tennis_rl.record --config $Config --level $Level --output $Output --serve $Serve
-$RecordArgs = @("-m", "tennis_rl.record", "--config", $Config, "--level", $Level, "--output", $Output, "--serve", $Serve)
+# Equivalent CLI form: python -m tennis_rl.record --config $Config --level $Level --output $Output --serve $Serve --sampling $Sampling
+$RecordArgs = @("-m", "tennis_rl.record", "--config", $Config, "--level", $Level, "--output", $Output, "--serve", $Serve, "--sampling", $Sampling)
+if ($Sampling -eq "point" -and $Points -gt 0) {
+    $RecordArgs += @("--points", $Points)
+}
 if ($FrameSkip -gt 0) {
     $RecordArgs += @("--frame-skip", $FrameSkip)
 }

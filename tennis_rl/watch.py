@@ -32,6 +32,7 @@ from .mesen_client import MesenWorker
 from .model import RecurrentActorCritic
 from .hierarchical import HierarchicalActorCritic, HierarchicalController
 from .inference_compat import validate_checkpoint_runtime
+from .rom_patcher import resolve_rom
 
 
 def main() -> None:
@@ -42,11 +43,24 @@ def main() -> None:
     parser.add_argument("--sample", action="store_true", help="Sample actions instead of taking the argmax (deterministic).")
     parser.add_argument("--level", type=int, default=1, choices=range(1, 6), metavar="{1-5}",
                         help="CPU difficulty level to select on the level-select screen (1=easiest, 5=hardest). Default: 1.")
+    parser.add_argument("--serve", default=None, choices=["serve-first", "receive-first"],
+                        help="Serve mode: who serves game 1 (default from config).")
+    parser.add_argument("--sampling", "--episode-mode", choices=["point", "game"], default="game",
+                        help="Watching scope: 'point' (watch N individual points) or 'game' (watch N regular games).")
     parser.add_argument("--no-autostart", action="store_true",
                         help="Disable automatic menu navigation (press Start and choose a level yourself).")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    if args.level is not None:
+        cfg.mesen.game_level = args.level
+    if args.serve is not None:
+        cfg.mesen.serve_mode = args.serve
+    cfg.mesen.rom = str(resolve_rom(
+        cfg.mesen.rom, serve_mode=cfg.mesen.serve_mode, level=cfg.mesen.game_level,
+    ))
+    print(f"Watch live | Sampling: {args.sampling} | Serve: {cfg.mesen.serve_mode} | Level: {cfg.mesen.game_level}")
+    print(f"ROM: {cfg.mesen.rom}")
     if cfg.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA is unavailable.")
     device = torch.device(cfg.device)
@@ -68,7 +82,8 @@ def main() -> None:
         max(cfg.mesen.startup_timeout_s, 60.0),  # picking a difficulty yourself takes longer than a scripted boot
         cfg.mesen.socket_timeout_s,
         match_games=cfg.mesen.match_games,
-        game_level=args.level,
+        game_level=cfg.mesen.game_level,
+        serve_mode=cfg.mesen.serve_mode,
         point_win=cfg.reward.point_win,
         point_loss=cfg.reward.point_loss,
         game_win=cfg.reward.game_win,
@@ -80,7 +95,9 @@ def main() -> None:
         lockstep_timeout_s=cfg.mesen.lockstep_timeout_s,
         strict_lockstep=True,
     )
-    env = ParallelTennis([worker], cfg.environment.stack_size, cfg.environment.episode_max_steps)
+    is_point = args.sampling == "point"
+    max_steps = getattr(cfg.scenario, "point_max_steps", 900) if is_point else cfg.environment.episode_max_steps
+    env = ParallelTennis([worker], cfg.environment.stack_size, max_steps, point_episodes=is_point, point_max_steps=max_steps)
 
     controller = None
     if hierarchical:
