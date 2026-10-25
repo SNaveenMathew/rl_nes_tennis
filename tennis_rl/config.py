@@ -20,6 +20,9 @@ class MesenConfig:
     frame_skip: int = 1
     match_games: int = 6
     game_level: int = 1
+    # "serve-first": player serves game 1; "receive-first": CPU serves game 1.
+    # resolve_rom() reads this to select and generate the correct patched ROM.
+    serve_mode: str = "serve-first"
     observation_width: int = 256
     observation_height: int = 240
     # Native RGB is stored only by the human demonstration recorder, never by RL workers.
@@ -35,6 +38,7 @@ class MesenConfig:
     # (deterministic frame timing). Ignored for human recording.
     lockstep: bool = True
     lockstep_timeout_s: float = 600.0
+
 
 
 @dataclass

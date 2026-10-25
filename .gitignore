@@ -75,3 +75,6 @@ app/.cache/
 *.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm
+
+# Scratch directory
+scratch/

@@ -5,13 +5,16 @@ Creates patched variants of 'Tennis (JU).nes' that:
 2. Bypass the Level Selection Screen (0 frames spent on difficulty menu).
 3. Set the opponent difficulty level directly into RAM ($004C) on boot.
 4. Support Serve-First (Player 1 serves) and Receive-First (CPU serves, Player 1 receives).
-5. Reduce the match entrance delay ($0026) from ~100 frames to 1 frame, placing players
-   instantly in position to serve/receive.
+
+Primary entry-point for all downstream scripts: ``resolve_rom()``.
+It generates the correct patched ROM on demand and returns an absolute path
+that can be passed directly to MesenWorker.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 from pathlib import Path
 
 
@@ -128,16 +131,109 @@ def generate_standard_roms(
     return serve_path, receive_path
 
 
+
+def resolve_rom(
+    base_rom_path: str | Path,
+    serve_mode: str = "serve-first",
+    level: int = 1,
+    output_dir: str | Path | None = None,
+) -> Path:
+    """Generate the correct patched ROM on demand and return its absolute path.
+
+    This is the single entry-point used by all downstream scripts (train,
+    record, evaluate, watch). It patches the base ROM for the requested
+    ``serve_mode`` and ``level``, writes it to ``output_dir`` (same directory
+    as the base ROM if not specified) and returns an absolute ``Path`` ready to
+    pass directly to ``MesenWorker``.
+
+    The output filename encodes serve_mode and level so multiple processes
+    running at different levels never overwrite each other::
+
+        Tennis (JU) - Serve-L2.nes
+        Tennis (JU) - Receive-L3.nes
+
+    The file is (re)written only when its content would change, so repeated
+    calls are cheap.
+
+    Args:
+        base_rom_path: Path to the clean 'Tennis (JU).nes' (24592 bytes).
+        serve_mode: ``"serve-first"`` (player serves) or ``"receive-first"``
+            (CPU serves, player receives).
+        level: Opponent difficulty level 1..5.  Baked into ROM at $F88A so the
+            game starts at the correct level even without the Lua bridge.  The
+            bridge also writes MESEN_RL_LEVEL into RAM each frame, so this is
+            consistent regardless of whether the bridge is active.
+        output_dir: Directory where the patched ROM is written. Defaults to
+            the directory containing ``base_rom_path``.
+
+    Returns:
+        Absolute ``Path`` to the patched ROM file.
+
+    Raises:
+        ValueError: If ``serve_mode`` is not recognised.
+        FileNotFoundError: If ``base_rom_path`` does not exist.
+    """
+    if serve_mode not in {"serve-first", "receive-first"}:
+        raise ValueError(
+            f"serve_mode must be 'serve-first' or 'receive-first', got {serve_mode!r}"
+        )
+    level = max(1, min(5, int(level)))
+    base_path = Path(base_rom_path).resolve()
+    if not base_path.is_file():
+        # Check standard fallback locations
+        candidates = [
+            base_path.parent / "Tennis (JU).nes",
+            Path("Tennis (JU).nes").resolve(),
+            Path("C:/Users/dbznf/Documents/NES/Tennis (JU).nes").resolve(),
+        ]
+        found = False
+        for c in candidates:
+            if c.is_file():
+                base_path = c
+                found = True
+                break
+        if not found:
+            raise FileNotFoundError(f"Base NES Tennis ROM not found: {base_rom_path}")
+
+    # If the provided path is an already patched variant, prefer the clean base ROM
+    clean_candidate = base_path.parent / "Tennis (JU).nes"
+    if clean_candidate.is_file():
+        base_path = clean_candidate
+
+    out_dir = Path(output_dir).resolve() if output_dir else base_path.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    mode_tag = "Serve" if serve_mode == "serve-first" else "Receive"
+    out_path = out_dir / f"Tennis (JU) - {mode_tag}-L{level}.nes"
+
+    raw_bytes = base_path.read_bytes()
+    receive_first = serve_mode == "receive-first"
+    patched = patch_tennis_rom(raw_bytes, level=level, receive_first=receive_first)
+
+    # Only write if content differs (avoids churn when called repeatedly).
+    if not out_path.exists() or out_path.read_bytes() != patched:
+        out_path.write_bytes(patched)
+
+    return out_path
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate fast-boot patched Tennis (JU) ROMs.")
     parser.add_argument("--input", default="Tennis (JU).nes", help="Path to base Tennis (JU).nes ROM")
     parser.add_argument("--output-dir", default=".", help="Directory to save patched ROMs")
     parser.add_argument("--level", type=int, default=1, choices=range(1, 6), help="Default opponent level (1-5)")
+    parser.add_argument("--serve", choices=["serve-first", "receive-first", "both"], default="both",
+                        help="Generate specific serve mode or both")
     args = parser.parse_args()
 
-    serve_path, receive_path = generate_standard_roms(args.input, args.output_dir, level=args.level)
-    print(f"Generated Serve-First ROM:   {serve_path}")
-    print(f"Generated Receive-First ROM: {receive_path}")
+    if args.serve in {"serve-first", "receive-first"}:
+        out_path = resolve_rom(args.input, serve_mode=args.serve, level=args.level, output_dir=args.output_dir)
+        print(f"Generated {args.serve} (L{args.level}) ROM: {out_path}")
+    else:
+        s_path = resolve_rom(args.input, serve_mode="serve-first", level=args.level, output_dir=args.output_dir)
+        r_path = resolve_rom(args.input, serve_mode="receive-first", level=args.level, output_dir=args.output_dir)
+        print(f"Generated Serve-First (L{args.level}) ROM:   {s_path}")
+        print(f"Generated Receive-First (L{args.level}) ROM: {r_path}")
     return 0
 
 

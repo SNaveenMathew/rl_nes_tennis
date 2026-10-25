@@ -53,6 +53,7 @@ class MesenWorker:
         capture_native_frames: bool = False,
         strict_lockstep: bool = False,
         strict_lockstep_wait_s: float = 0.70,
+        serve_mode: str = "serve-first",
     ) -> None:
         # This controller is configured for one policy decision per raw NES frame
         # at the full native raster. Fail before launching Mesen if any caller
@@ -76,6 +77,7 @@ class MesenWorker:
         self.socket_timeout = socket_timeout
         self.match_games = match_games
         self.game_level = game_level
+        self.serve_mode = str(serve_mode)
         self.point_win = point_win
         self.point_loss = point_loss
         self.game_win = game_win
@@ -168,6 +170,7 @@ class MesenWorker:
             # training, or evaluation on the title/level-selection screens.
             "MESEN_RL_AUTO_BOOT": "1",
             "MESEN_RL_LEVEL": str(self.game_level),
+            "MESEN_RL_SERVE_MODE": str(self.serve_mode),
             "MESEN_RL_POINT_WIN": str(self.point_win),
             "MESEN_RL_POINT_LOSS": str(self.point_loss),
             "MESEN_RL_GAME_WIN": str(self.game_win),

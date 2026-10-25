@@ -313,13 +313,37 @@ local function poll_command()
     end
 end
 
+local SERVE_MODE = os.getenv("MESEN_RL_SERVE_MODE") or "serve-first"
+
+local function read_u8(addr)
+    return emu.read(addr, emu.memType.nesMemory or emu.memType.cpu or 0, false)
+end
+
 local function get_boot_input()
     clear_buttons()
-    -- Mesen's inputPolled event is documented to fire once per emulated frame.
-    -- Treat these as frame numbers, and use one-frame button pulses. Holding Start
-    -- across a menu transition can confirm more than one menu and skip the level
-    -- screen, which leaves recording/training at the title screen or wrong mode.
     boot_frame = boot_frame + 1
+
+    -- Fast-boot detection for patched ROMs:
+    -- If title screen is bypassed ($38 == 0) and court init is active ($3D >= 1):
+    local s38 = read_u8(0x0038)
+    local s3D = read_u8(0x003D)
+    if s38 == 0 and s3D >= 1 then
+        pcall(function()
+            emu.write(0x004C, GAME_LEVEL - 1, emu.memType.nesMemory or emu.memType.cpu or 0)
+            if SERVE_MODE == "receive-first" then
+                local s8d = read_u8(0x008D)
+                if s8d ~= 0 and (s8d % 4 < 2) then
+                    emu.write(0x008D, s8d + 2, emu.memType.nesMemory or emu.memType.cpu or 0)
+                end
+            end
+        end)
+        -- Patched ROM skips menus and initializes match state in ~8 frames
+        if boot_frame >= 8 and not boot_complete then
+            boot_complete = true
+            snapshot_pending = true -- READY is written once match savestate is created
+        end
+        return BUTTONS
+    end
 
     -- A fresh ROM boot defaults the title-menu cursor to SINGLES GAME. Wait for
     -- the title screen, then tap Start once to open the opponent-level selector.
@@ -387,10 +411,6 @@ local function current_input()
         end
     end
     return BUTTONS
-end
-
-local function read_u8(addr)
-    return emu.read(addr, emu.memType.nesMemory or emu.memType.cpu or 0, false)
 end
 
 -- Mesen releases may expose the framebuffer only after the first rendered frame.
